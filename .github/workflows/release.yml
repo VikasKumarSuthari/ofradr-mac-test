@@ -1,0 +1,41 @@
+name: Release macOS DMG
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+
+    - name: Build release binary
+      run: cargo build --release
+
+    - name: Create app bundle
+      run: |
+        mkdir -p GhostMac.app/Contents/{MacOS,Resources}
+        cp target/release/ghostmac GhostMac.app/Contents/MacOS/
+        cp Info.plist GhostMac.app/Contents/
+        echo -n 'APPL????' > GhostMac.app/Contents/PkgInfo
+
+    - name: Create DMG
+      run: |
+        brew install create-dmg
+        create-dmg \
+          --volname "GhostMac" \
+          --window-pos 200 120 \
+          --window-size 600 400 \
+          --icon-size 100 \
+          --app-drop-link 450 185 \
+          --no-internet-enable \
+          "GhostMac.dmg" \
+          "GhostMac.app"
+
+    - name: Upload DMG
+      uses: actions/upload-artifact@v4
+      with:
+        name: GhostMac-dmg
+        path: GhostMac.dmg
