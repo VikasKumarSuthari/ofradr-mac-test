@@ -1,20 +1,20 @@
 #![allow(non_snake_case)]
 use cocoa::appkit::{
-    NSApp, NSApplication, NSApplicationActivationPolicyAccessory, NSBorderlessWindowMask,
-    NSColor, NSFloatingWindowLevel, NSWindow, NSWindowCollectionBehaviorCanJoinAllSpaces,
-    NSWindowCollectionBehaviorStationary, NSWindowCollectionBehaviorIgnoresCycle,
+    NSApp, NSApplication, NSApplicationActivationPolicyAccessory,
+    NSColor, NSWindow, NSWindowStyleMask, NSWindowCollectionBehavior,
+    NSBackingStoreType,
 };
-use cocoa::base::{id, nil};
-use cocoa::foundation::{NSPoint, NSRect, NSSize};
-use core_graphics::display::{CGDisplayBounds, CGMainDisplayID};
-use objc::runtime::{Object, Sel};
+use cocoa::base::nil;
+use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize};
+use core_graphics::display::CGMainDisplayID;
 use std::ffi::c_void;
 use std::thread;
 
+// CGS private APIs for space management
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
-    fn CGSGetSpaceID(conn: CGSConnection, pid: i32) -> i32;
     fn CGSDefaultConnectionForThread() -> CGSConnection;
+    fn CGSGetActiveSpace(conn: CGSConnection) -> i32;
     fn CGSMoveWindowsToManagedSpace(
         conn: CGSConnection,
         window_ids: *const c_void,
@@ -23,61 +23,67 @@ extern "C" {
 }
 type CGSConnection = *mut c_void;
 
+// Window level constants
+const kCGFloatingWindowLevel: i64 = 5;
+
 fn main() {
     unsafe {
-        let _pool = cocoa::foundation::NSAutoreleasePool::new(nil);
+        let _pool = NSAutoreleasePool::new(nil);
 
-        NSApp().setActivationPolicy_(NSApplicationActivationPolicyAccessory);
+        let app = NSApp();
+        app.setActivationPolicy_(NSApplicationActivationPolicyAccessory);
 
-        let frame = {
-            let display = CGMainDisplayID();
-            let bounds = CGDisplayBounds(display);
-            NSRect::new(
-                NSPoint::new(200.0, 200.0),
-                NSSize::new(400.0, 300.0),
-            )
-        };
+        let frame = NSRect::new(
+            NSPoint::new(200.0, 200.0),
+            NSSize::new(400.0, 300.0),
+        );
 
         let window = NSWindow::alloc(nil).initWithContentRect_styleMask_backing_defer_(
             frame,
-            NSBorderlessWindowMask,
-            cocoa::appkit::NSBackingStoreBuffered,
+            NSWindowStyleMask::NSBorderlessWindowMask,
+            NSBackingStoreType::NSBackingStoreBuffered,
             false,
         );
 
         window.setBackgroundColor_(NSColor::clearColor(nil));
         window.setOpaque_(false);
         window.setHasShadow_(false);
-        window.setLevel_(NSFloatingWindowLevel);
-        window.setCollectionBehavior_(
-            NSWindowCollectionBehaviorCanJoinAllSpaces
-                | NSWindowCollectionBehaviorStationary
-                | NSWindowCollectionBehaviorIgnoresCycle,
-        );
+        window.setLevel_(kCGFloatingWindowLevel);
+        
+        // Set collection behavior to follow all spaces
+        let behavior = NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
+            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle;
+        window.setCollectionBehavior_(behavior);
+        
         window.center();
         window.makeKeyAndOrderFront_(nil);
 
-        // desktop-jump thread
-        let window_id = window.windowNumber();
-        thread::spawn(move || unsafe {
+        // Get window number using message passing
+        let window_number: i64 = msg_send![window, windowNumber];
+        
+        // Desktop-jump thread - follows user to each space
+        thread::spawn(move || {
             let conn = CGSDefaultConnectionForThread();
-            let mut last = CGSGetSpaceID(conn, std::process::id() as i32);
+            let mut last_space = CGSGetActiveSpace(conn);
             loop {
                 thread::sleep(std::time::Duration::from_millis(500));
-                let curr = CGSGetSpaceID(conn, std::process::id() as i32);
-                if curr != last {
-                    last = curr;
-                    let ids = vec![window_id];
+                let curr_space = CGSGetActiveSpace(conn);
+                if curr_space != last_space && curr_space != 0 {
+                    last_space = curr_space;
+                    let ids: [i64; 1] = [window_number];
                     CGSMoveWindowsToManagedSpace(
                         conn,
                         ids.as_ptr() as *const c_void,
-                        curr,
+                        curr_space,
                     );
                 }
             }
         });
 
-        let app = NSApp();
         app.run();
     }
 }
+
+#[macro_use]
+extern crate objc;
