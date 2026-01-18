@@ -31,8 +31,21 @@ const kCGFloatingWindowLevel: i64 = 2147483631;       // Normal floating
 const kCGScreenSaverWindowLevel: i64 = 2147483647 - 1; // Very high - above most apps
 const kCGMaximumWindowLevel: i64 = 2147483647;         // Maximum possible level
 
-// Use this for appearing above SEB/kiosk apps - MAXIMUM level
-const WINDOW_LEVEL: i64 = kCGMaximumWindowLevel;
+// CGWindowLevelKey values for CGWindowLevelForKey
+const kCGAssistiveTechHighWindowLevelKey: i32 = 20;
+const kCGCursorWindowLevelKey: i32 = 19;
+const kCGDraggingWindowLevelKey: i32 = 12;
+
+// External CoreGraphics functions
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGWindowLevelForKey(key: i32) -> i64;
+    fn CGSMainConnectionID() -> u32;
+    fn CGSSetWindowLevel(connection: u32, window_id: u32, level: i64) -> i32;
+}
+
+// Use this for appearing above SEB/kiosk apps - try Assistive Tech level
+static USE_ASSISTIVE_LEVEL: bool = true;
 const NSWindowSharingNone: u64 = 0;
 const NSBezelStyleRounded: u64 = 1;
 const NSEventTypeKeyDown: u64 = 10;
@@ -114,10 +127,19 @@ extern "C" fn space_did_change(_this: &Object, _cmd: Sel, _notification: id) {
     unsafe {
         let window = WINDOW.load(Ordering::SeqCst);
         if !window.is_null() {
+            // Get the highest window level we can
+            let window_level = CGWindowLevelForKey(kCGAssistiveTechHighWindowLevelKey);
+            
             // Reassert level and bring to front
-            let _: () = msg_send![window, setLevel: WINDOW_LEVEL];
+            let _: () = msg_send![window, setLevel: window_level];
             let _: () = msg_send![window, orderFrontRegardless];
-            log_to_file("Window level reasserted and brought to front");
+            
+            // Also try CGS private API
+            let window_number: i64 = msg_send![window, windowNumber];
+            let cgs_connection = CGSMainConnectionID();
+            let _ = CGSSetWindowLevel(cgs_connection, window_number as u32, window_level + 1000);
+            
+            log_to_file(&format!("Window level reasserted to {} and brought to front", window_level));
         }
     }
     
@@ -414,7 +436,26 @@ fn main() {
         let _: () = msg_send![window, setBackgroundColor: black_color];
         let _: () = msg_send![window, setOpaque: YES];
         let _: () = msg_send![window, setHasShadow: NO];
-        let _: () = msg_send![window, setLevel: WINDOW_LEVEL]; // High level to appear above SEB
+        
+        // Try multiple window level approaches to appear above SEB
+        let window_level: i64;
+        if USE_ASSISTIVE_LEVEL {
+            // Try to get Assistive Tech High window level - might work above secure apps
+            window_level = CGWindowLevelForKey(kCGAssistiveTechHighWindowLevelKey);
+            log_to_file(&format!("Using Assistive Tech High window level: {}", window_level));
+        } else {
+            window_level = kCGMaximumWindowLevel;
+            log_to_file(&format!("Using Maximum window level: {}", window_level));
+        }
+        
+        let _: () = msg_send![window, setLevel: window_level];
+        
+        // Also try the private CGS API to set window level
+        let window_number: i64 = msg_send![window, windowNumber];
+        let cgs_connection = CGSMainConnectionID();
+        let cgs_result = CGSSetWindowLevel(cgs_connection, window_number as u32, window_level + 1000);
+        log_to_file(&format!("CGSSetWindowLevel result: {} (0=success)", cgs_result));
+        
         let _: () = msg_send![window, setSharingType: NSWindowSharingNone];
         
         // Critical panel settings for non-activation
