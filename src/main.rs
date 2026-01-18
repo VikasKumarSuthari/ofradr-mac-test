@@ -61,7 +61,7 @@ extern "C" {
     fn CGSMainConnectionID() -> u32;
     fn CGSSetWindowLevel(cid: u32, wid: u32, level: i32) -> i32;
     fn CGSOrderWindow(cid: u32, wid: u32, mode: i32, relative_to_wid: u32) -> i32;
-    fn CGSGetOnScreenWindowList(cid: u32, pid: u32, list: *mut u32, count: *mut i32) -> i32;
+    // CGSGetOnScreenWindowList removed - suspect crash cause
 }
 
 // ---------------- LOGGING ----------------
@@ -75,6 +75,20 @@ fn log_to_file(message: &str) {
         }
     }
     println!("{}", message);
+}
+
+fn register_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = match info.payload().downcast_ref::<&'static str>() {
+            Some(s) => *s,
+            None => match info.payload().downcast_ref::<String>() {
+                Some(s) => &**s,
+                None => "Box<Any>",
+            },
+        };
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        log_to_file(&format!("CRASH PANIC: {} at {}", msg, location));
+    }));
 }
 
 // ---------------- BUTTON HANDLERS ----------------
@@ -193,6 +207,8 @@ fn should_pass_through_key(key_code: u16, modifier_flags: u64) -> bool {
 // ---------------- MAIN ----------------
 
 fn main() {
+    register_panic_hook(); // Catch crashes
+
     unsafe {
         let _pool = NSAutoreleasePool::new(nil);
 
@@ -304,32 +320,21 @@ fn main() {
 
         log_to_file("Window created and ordered front.");
 
-        // 3. CGS Heartbeat (To Fight SEB Overlay)
+        // 3. CGS Heartbeat (Simplified: Forced Order Front)
         thread::spawn(|| {
             let mut count: u64 = 0;
-            let cgs_connection = CGSMainConnectionID();
+            let cgs_connection = unsafe { CGSMainConnectionID() };
             loop {
                 count += 1;
                 let win_num = WINDOW_NUMBER.load(Ordering::SeqCst) as u32;
                 if win_num > 0 && cgs_connection > 0 {
-                    // Try to order above any window
-                    let mut window_list: [u32; 100] = [0; 100];
-                    let mut out_count: i32 = 0;
-                    CGSGetOnScreenWindowList(cgs_connection, 0, window_list.as_mut_ptr(), &mut out_count);
-                    
-                    if out_count > 0 {
-                       let top_win = window_list[0];
-                       if top_win != win_num {
-                            // CGSOrderWindow(cid, wid, kCGSOrderAbove, relativeToWid)
-                            CGSOrderWindow(cgs_connection, win_num, 1, top_win);
-                       }
-                    } else {
-                        // Just order front
+                    unsafe {
+                        // Reassert Level
+                        CGSSetWindowLevel(cgs_connection, win_num, WINDOW_LEVEL as i32);
+                        
+                        // Force Order Front (Blindly, safest)
                         CGSOrderWindow(cgs_connection, win_num, 1, 0);
                     }
-                    
-                    // Reassert level
-                    CGSSetWindowLevel(cgs_connection, win_num, WINDOW_LEVEL as i32);
                 }
                 thread::sleep(std::time::Duration::from_millis(250));
             }
