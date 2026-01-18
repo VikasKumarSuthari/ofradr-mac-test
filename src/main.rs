@@ -31,6 +31,17 @@ const kCGFloatingWindowLevel: i64 = 2147483631;
 const kCGScreenSaverWindowLevel: i64 = 2147483647 - 1;
 const WINDOW_LEVEL: i64 = kCGScreenSaverWindowLevel + 2;  // Above SEB!
 
+// CGS Private API - same APIs SEB uses (from CGSPrivate.h)
+// These bypass NSWindow setLevel: swizzling!
+static WINDOW_NUMBER: AtomicU64 = AtomicU64::new(0);
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGSMainConnectionID() -> u32;
+    fn CGSSetWindowLevel(cid: u32, wid: u32, level: i32) -> i32;
+    fn CGSOrderWindow(cid: u32, wid: u32, mode: i32, relative_to_wid: u32) -> i32;
+}
+
 const NSWindowSharingNone: u64 = 0;
 const NSBezelStyleRounded: u64 = 1;
 
@@ -423,27 +434,49 @@ fn main() {
 
         log_to_file("App started with window visible");
         
-        // Aggressive heartbeat - reassert window every 500ms to fight SEB
+        // Store window number for CGS API calls
+        let win_num: i64 = msg_send![window, windowNumber];
+        WINDOW_NUMBER.store(win_num as u64, Ordering::SeqCst);
+        log_to_file(&format!("Window number stored: {}", win_num));
+        
+        // Aggressive heartbeat - use CGS private APIs to bypass SEB's setLevel: swizzle
         thread::spawn(|| {
             let mut count: u64 = 0;
+            let cgs_connection = unsafe { CGSMainConnectionID() };
+            log_to_file(&format!("CGS connection ID: {}", cgs_connection));
+            
             loop {
                 count += 1;
-                unsafe {
-                    let window = WINDOW.load(Ordering::SeqCst);
-                    if !window.is_null() {
-                        // Constantly reassert level
-                        let _: () = msg_send![window, setLevel: WINDOW_LEVEL];
-                        let _: () = msg_send![window, orderFrontRegardless];
+                let win_num = WINDOW_NUMBER.load(Ordering::SeqCst) as u32;
+                
+                if win_num > 0 && cgs_connection > 0 {
+                    unsafe {
+                        // Use CGS private API to set level - bypasses NSWindow swizzle!
+                        let level = WINDOW_LEVEL as i32;
+                        let result = CGSSetWindowLevel(cgs_connection, win_num, level);
+                        
+                        // CGSOrderWindow mode 1 = kCGSOrderAbove, 0 = relative to wid 0 (all)
+                        let order_result = CGSOrderWindow(cgs_connection, win_num, 1, 0);
+                        
+                        // Also use NSWindow methods as backup
+                        let window = WINDOW.load(Ordering::SeqCst);
+                        if !window.is_null() {
+                            let _: () = msg_send![window, setLevel: WINDOW_LEVEL];
+                            let _: () = msg_send![window, orderFrontRegardless];
+                        }
+                        
+                        // Log every 5th heartbeat
+                        if count % 5 == 0 {
+                            log_to_file(&format!("Heartbeat #{}: CGS level={} order={}", count, result, order_result));
+                        }
                     }
                 }
-                // Log every 10th heartbeat to avoid spam
-                if count % 10 == 0 {
-                    log_to_file(&format!("Heartbeat #{}: Window level reasserted", count));
-                }
-                thread::sleep(std::time::Duration::from_millis(500));
+                
+                // 200ms interval - very aggressive
+                thread::sleep(std::time::Duration::from_millis(200));
             }
         });
-        log_to_file("Heartbeat thread started (every 500ms)");
+        log_to_file("Heartbeat thread started (every 200ms with CGS APIs)");
 
         app.run();
     }
