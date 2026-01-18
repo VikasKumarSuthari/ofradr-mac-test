@@ -101,6 +101,45 @@ extern "C" fn panel_can_become_main_window(_this: &Object, _cmd: Sel) -> BOOL {
     NO // Never become main window
 }
 
+extern "C" fn panel_works_when_modal(_this: &Object, _cmd: Sel) -> BOOL {
+    YES // Work even when modal dialogs are present
+}
+
+// Override sendEvent to prevent activation on mouse events
+extern "C" fn panel_send_event(this: &Object, _cmd: Sel, event: id) {
+    unsafe {
+        let event_type: u64 = msg_send![event, type_];
+        
+        // Event types: 1=LeftMouseDown, 2=LeftMouseUp, 3=RightMouseDown, etc.
+        // For mouse events, we dispatch WITHOUT activating
+        let is_mouse_event = event_type >= 1 && event_type <= 9;
+        
+        if is_mouse_event {
+            // Find the view at the event location and deliver directly
+            let content_view: id = msg_send![this, contentView];
+            let location: cocoa::foundation::NSPoint = msg_send![event, locationInWindow];
+            let hit_view: id = msg_send![content_view, hitTest: location];
+            
+            if hit_view != nil {
+                // Send directly to the view without activating window
+                if event_type == 1 { // LeftMouseDown
+                    let _: () = msg_send![hit_view, mouseDown: event];
+                } else if event_type == 2 { // LeftMouseUp
+                    let _: () = msg_send![hit_view, mouseUp: event];
+                } else {
+                    // For other mouse events, call super
+                    let superclass = Class::get("NSPanel").unwrap();
+                    let _: () = msg_send![super(this, superclass), sendEvent: event];
+                }
+            }
+        } else {
+            // For non-mouse events, call super normally
+            let superclass = Class::get("NSPanel").unwrap();
+            let _: () = msg_send![super(this, superclass), sendEvent: event];
+        }
+    }
+}
+
 // ---------------- FOCUSLESS BUTTON ----------------
 
 extern "C" fn button_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> BOOL {
@@ -212,6 +251,16 @@ fn register_non_activating_panel_class() {
             decl.add_method(
                 sel!(canBecomeMainWindow),
                 panel_can_become_main_window as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+            // Work when modal
+            decl.add_method(
+                sel!(worksWhenModal),
+                panel_works_when_modal as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+            // Override sendEvent to prevent activation
+            decl.add_method(
+                sel!(sendEvent:),
+                panel_send_event as extern "C" fn(&Object, Sel, id),
             );
         }
 
