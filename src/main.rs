@@ -16,16 +16,6 @@ use objc::declare::ClassDecl;
 use std::sync::Once;
 use std::sync::atomic::{AtomicPtr, AtomicBool, AtomicU64, Ordering};
 use std::thread;
-use std::sync::Mutex;
-
-use core_graphics::event::{
-    CGEventTap, CGEventTapLocation, CGEventTapPlacement, CGEventTapOptions,
-    CGEventType, CGEvent,
-};
-use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
-
-// Lazy static for window frame (x, y, width, height)
-static WINDOW_FRAME: Mutex<(f64, f64, f64, f64)> = Mutex::new((0.0, 0.0, 0.0, 0.0));
 
 // ---------------- GLOBAL STATE ----------------
 
@@ -88,7 +78,7 @@ extern "C" fn space_did_change(_this: &Object, _cmd: Sel, _notification: id) {
 // ---------------- NON-ACTIVATING PANEL ----------------
 
 extern "C" fn panel_can_become_key_window(_this: &Object, _cmd: Sel) -> BOOL {
-    NO // Never become key window
+    NO // Never become key window - prevents focus stealing
 }
 
 extern "C" fn panel_can_become_main_window(_this: &Object, _cmd: Sel) -> BOOL {
@@ -277,27 +267,6 @@ fn should_pass_through_key(key_code: u16, modifier_flags: u64) -> bool {
     false
 }
 
-// ---------------- MOUSE EVENT TAP ----------------
-
-fn is_mouse_in_window(mouse_x: f64, mouse_y: f64) -> bool {
-    if let Ok(guard) = WINDOW_FRAME.lock() {
-        let (x, y, w, h) = *guard;
-        if w > 0.0 && h > 0.0 {
-            return mouse_x >= x && mouse_x <= x + w && mouse_y >= y && mouse_y <= y + h;
-        }
-    }
-    false
-}
-
-fn update_window_frame(window: id) {
-    unsafe {
-        let frame: NSRect = msg_send![window, frame];
-        if let Ok(mut guard) = WINDOW_FRAME.lock() {
-            *guard = (frame.origin.x, frame.origin.y, frame.size.width, frame.size.height);
-        }
-    }
-}
-
 // ---------------- MAIN ----------------
 
 fn main() {
@@ -335,7 +304,7 @@ fn main() {
             NSSize::new(400.0, 300.0),
         );
 
-        // Use NonActivatingPanel
+        // Use NonActivatingPanel - like WS_EX_NOACTIVATE on Windows
         let panel_class = Class::get("NonActivatingPanel").unwrap();
         let window: id = msg_send![panel_class, alloc];
         let window: id = msg_send![window,
@@ -376,7 +345,7 @@ fn main() {
         let handler_class = Class::get("ButtonHandler").unwrap();
         let handler: id = msg_send![handler_class, new];
 
-        // Use regular NSButton (simpler, more stable)
+        // Use regular NSButton
         let button_class = Class::get("NSButton").unwrap();
 
         // Close button
@@ -518,50 +487,8 @@ fn main() {
 
         let _: () = msg_send![window, center];
         let _: () = msg_send![window, orderFrontRegardless];
-        
-        // Store initial window frame
-        update_window_frame(window);
 
-        // Set up CGEventTap to swallow mouse events over our window
-        // This requires Accessibility permissions
-        let tap_result = CGEventTap::new(
-            CGEventTapLocation::Session,
-            CGEventTapPlacement::HeadInsertEventTap,
-            CGEventTapOptions::Default,
-            vec![CGEventType::LeftMouseDown, CGEventType::LeftMouseUp],
-            |_proxy, _event_type, event| {
-                // Get mouse location from event
-                let location = event.location();
-                
-                // Check if mouse is in our window
-                if is_mouse_in_window(location.x, location.y) {
-                    println!("Mouse event swallowed at ({}, {})", location.x, location.y);
-                    // Return None to swallow the event
-                    return None;
-                }
-                
-                // Pass through
-                Some(event)
-            },
-        );
-        
-        match tap_result {
-            Ok(tap) => {
-                let source = tap.mach_port.create_runloop_source(0);
-                if let Ok(src) = source {
-                    CFRunLoop::get_current().add_source(&src, unsafe { kCFRunLoopCommonModes });
-                    tap.enable();
-                    println!("Mouse event tap installed successfully!");
-                    // Keep the tap alive
-                    std::mem::forget(tap);
-                }
-            }
-            Err(()) => {
-                println!("Failed to create mouse event tap - check Accessibility permissions");
-            }
-        }
-
-        println!("App started - window should be visible");
+        println!("App started - NonActivatingPanel with canBecomeKeyWindow=NO");
 
         app.run();
     }
