@@ -362,6 +362,9 @@ fn main() {
                             
                             // Get Window ID
                             let k_number = CFString::new("kCGWindowNumber");
+                            let k_owner = CFString::new("kCGWindowOwnerName");
+                            let k_layer = CFString::new("kCGWindowLayer");
+
                             if let Some(num_obj) = dic.find(&k_number) {
                                 let num_ref = num_obj.as_CFTypeRef() as core_foundation::number::CFNumberRef;
                                 let num = unsafe { CFNumber::wrap_under_get_rule(num_ref) };
@@ -369,6 +372,24 @@ fn main() {
                                     let wid_u32 = wid as u32;
                                     if wid_u32 != my_win_num {
                                         top_window_found = wid_u32;
+                                        
+                                        // LOGGING: Who is this window?
+                                        if count % 20 == 0 { // Log once per second (approx)
+                                            let mut owner_name = "Unknown".to_string();
+                                            if let Some(owner_obj) = dic.find(&k_owner) {
+                                                let owner_ref = owner_obj.as_CFTypeRef() as core_foundation::string::CFStringRef;
+                                                owner_name = unsafe { CFString::wrap_under_get_rule(owner_ref) }.to_string();
+                                            }
+                                            
+                                            let mut layer_val = 0;
+                                            if let Some(layer_obj) = dic.find(&k_layer) {
+                                                let layer_ref = layer_obj.as_CFTypeRef() as core_foundation::number::CFNumberRef;
+                                                if let Some(l) = unsafe { CFNumber::wrap_under_get_rule(layer_ref) }.to_i32() {
+                                                    layer_val = l;
+                                                }
+                                            }
+                                            log_to_file(&format!("Fighting Top Window: ID={} Name='{}' Layer={}", wid_u32, owner_name, layer_val));
+                                        }
                                         break; // Found the top-most other window!
                                     }
                                 }
@@ -392,7 +413,7 @@ fn main() {
                         }
                     }
                 }
-                thread::sleep(std::time::Duration::from_millis(250));
+                thread::sleep(std::time::Duration::from_millis(50)); // 20x per second!
             }
         });
 
