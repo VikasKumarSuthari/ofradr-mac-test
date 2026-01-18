@@ -8,26 +8,8 @@ use objc::runtime::Class;
 use cocoa::base::nil;
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize};
 
-use std::ffi::c_void;
-use std::thread;
-
-// CGS private APIs for space management
-#[link(name = "ApplicationServices", kind = "framework")]
-extern "C" {
-    fn CGSDefaultConnectionForThread() -> CGSConnection;
-    fn CGSGetActiveSpace(conn: CGSConnection) -> i32;
-    fn CGSMoveWindowsToManagedSpace(
-        conn: CGSConnection,
-        window_ids: *const c_void,
-        space: i32,
-    ) -> i32;
-}
-type CGSConnection = *mut c_void;
-
 // Window level constants - using very high level to stay above ALL windows
-// Standard levels: Normal=0, Floating=5, Dock=20, ScreenSaver=1000, Overlay=102
-// Using a very high value to ensure we're always on top
-const kCGFloatingWindowLevel: i64 = 2147483631; // CGWindowLevelForKey(kCGMaximumWindowLevelKey) - near max
+const kCGFloatingWindowLevel: i64 = 2147483631;
 
 fn main() {
     unsafe {
@@ -55,36 +37,14 @@ fn main() {
         window.setHasShadow_(false);
         window.setLevel_(kCGFloatingWindowLevel);
         
-        // Set collection behavior to follow all spaces
+        // Set collection behavior to appear on all spaces
         let behavior = NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
-            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle;
+            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary;
         window.setCollectionBehavior_(behavior);
         
         window.center();
         window.makeKeyAndOrderFront_(nil);
-
-        // Get window number using message passing
-        let window_number: i64 = msg_send![window, windowNumber];
-        
-        // Desktop-jump thread - follows user to each space
-        thread::spawn(move || {
-            let conn = CGSDefaultConnectionForThread();
-            let mut last_space = CGSGetActiveSpace(conn);
-            loop {
-                thread::sleep(std::time::Duration::from_millis(500));
-                let curr_space = CGSGetActiveSpace(conn);
-                if curr_space != last_space && curr_space != 0 {
-                    last_space = curr_space;
-                    let ids: [i64; 1] = [window_number];
-                    CGSMoveWindowsToManagedSpace(
-                        conn,
-                        ids.as_ptr() as *const c_void,
-                        curr_space,
-                    );
-                }
-            }
-        });
 
         app.run();
     }
