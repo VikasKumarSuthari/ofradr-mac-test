@@ -43,6 +43,9 @@ const NSEventModifierFlagControl: u64 = 1 << 18;
 
 const NSFocusRingTypeNone: u64 = 1;
 
+// NSWindowStyleMask values - NSNonactivatingPanelMask is the KEY!
+const NSNonactivatingPanelMask: u64 = 1 << 7; // 128 - prevents activation when clicking
+
 static REGISTER_BUTTON_HANDLER: Once = Once::new();
 static REGISTER_DRAGGABLE_VIEW: Once = Once::new();
 static REGISTER_FOCUSLESS_TEXT_FIELD: Once = Once::new();
@@ -304,12 +307,16 @@ fn main() {
             NSSize::new(400.0, 300.0),
         );
 
-        // Use NonActivatingPanel - like WS_EX_NOACTIVATE on Windows
+        // Use NonActivatingPanel with NSNonactivatingPanelMask - like WS_EX_NOACTIVATE on Windows
         let panel_class = Class::get("NonActivatingPanel").unwrap();
         let window: id = msg_send![panel_class, alloc];
+        
+        // CRITICAL: NSNonactivatingPanelMask (128) prevents the panel from activating the application
+        let style_mask = NSWindowStyleMask::NSBorderlessWindowMask.bits() | NSNonactivatingPanelMask;
+        
         let window: id = msg_send![window,
             initWithContentRect:frame
-            styleMask:NSWindowStyleMask::NSBorderlessWindowMask
+            styleMask:style_mask
             backing:NSBackingStoreType::NSBackingStoreBuffered
             defer:NO
         ];
