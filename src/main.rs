@@ -403,10 +403,17 @@ fn main() {
                         unsafe {
                             // 2. DYNAMIC LEVEL ESCALATION
                             // Your logs showed SEB is at Layer 30. We set to Layer + 1.
-                            // CRITICAL FIX: Ensure we never drop below 2002 (ScreenSaver)
-                            // If Control Center (Layer 25) is top, we don't want to be 26 (SEB is 30).
-                            // We want to be max(2002, top+1).
-                            let mut target_level = top_window_layer + 1;
+                            // CRITICAL FIX 2: Prevent Overflow!
+                            // If top_window_layer is MaxInt (2147483647), adding 1 wraps to negative (Bottom!).
+                            // SEB Full Screen likely uses MaxInt (Shielding).
+                            let mut target_level = 0;
+                            if top_window_layer >= 2147483647 {
+                                target_level = 2147483647; // Cap at Max
+                            } else {
+                                target_level = top_window_layer + 1;
+                            }
+                            
+                            // CRITICAL FIX 1: Ensure we never drop below 2002 (ScreenSaver)
                             if target_level < 2002 {
                                 target_level = 2002;
                             }
