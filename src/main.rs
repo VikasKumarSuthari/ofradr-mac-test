@@ -288,20 +288,13 @@ fn main() {
         // respawn on space change logic
         // We define a block or selector to handle the notification
         // For simplicity in Rust/ObjC, we can just use the NotificationCenter with a block?
-        // Or simpler: Just perform the check in the loop?
         // No, loop is CGS based. Space Change is Cocoa.
         // Let's add an observer.
         
         let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
         let notification_center: id = msg_send![workspace, notificationCenter];
         
-        let block = \u{005e}(_notification: id) {
-            log_to_file("Space Change Detected! Respawning to jump space...");
-            if let Ok(exe_path) = std::env::current_exe() {
-                let _ = std::process::Command::new(exe_path).spawn();
-            }
-            std::process::exit(0);
-        };
+        // Removed invalid block syntax. Using SpaceObserver class instead.
         
         // Convert block to implementation? 
         // Rust closures as blocks are tricky. 
