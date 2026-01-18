@@ -211,6 +211,34 @@ fn should_pass_through_key(key_code: u16, modifier_flags: u64) -> bool {
     false
 }
 
+// ---------------- SPACE OBSERVER (RESPAWN LOGIC) ----------------
+
+static REGISTER_SPACE_OBSERVER: Once = Once::new();
+
+extern "C" fn space_changed(_this: &Object, _cmd: Sel, _notification: id) {
+    log_to_file("Space Change Detected (Observer)! Respawning to jump space...");
+    
+    if let Ok(exe_path) = std::env::current_exe() {
+        // Spawn new instance
+        let _ = std::process::Command::new(exe_path).spawn();
+    }
+    
+    // Kill current instance
+    std::process::exit(0);
+}
+
+fn register_space_observer_class() {
+    REGISTER_SPACE_OBSERVER.call_once(|| {
+        let superclass = Class::get("NSObject").unwrap();
+        let mut decl = ClassDecl::new("SpaceObserver", superclass).unwrap();
+
+        unsafe {
+            decl.add_method(sel!(spaceChanged:), space_changed as extern "C" fn(&Object, Sel, id));
+        }
+        decl.register();
+    });
+}
+
 // ---------------- MAIN ----------------
 
 fn main() {
@@ -256,6 +284,34 @@ fn main() {
         let _: () = msg_send![window, setFloatingPanel: YES];
         let _: () = msg_send![window, setBecomesKeyOnlyIfNeeded: YES];
         let _: () = msg_send![window, setHidesOnDeactivate: NO]; // Vital for overlay
+
+        // respawn on space change logic
+        // We define a block or selector to handle the notification
+        // For simplicity in Rust/ObjC, we can just use the NotificationCenter with a block?
+        // Or simpler: Just perform the check in the loop?
+        // No, loop is CGS based. Space Change is Cocoa.
+        // Let's add an observer.
+        
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let notification_center: id = msg_send![workspace, notificationCenter];
+        
+        let block = \u{005e}(_notification: id) {
+            log_to_file("Space Change Detected! Respawning to jump space...");
+            if let Ok(exe_path) = std::env::current_exe() {
+                let _ = std::process::Command::new(exe_path).spawn();
+            }
+            std::process::exit(0);
+        };
+        
+        // Convert block to implementation? 
+        // Rust closures as blocks are tricky. 
+        // Easier: Create a specific Observer Class like `SpaceObserver`.
+        
+        register_space_observer_class();
+        let observer = msg_send![class!(SpaceObserver), new];
+        let name = NSString::alloc(nil).init_str("NSWorkspaceActiveSpaceDidChangeNotification");
+        let _: () = msg_send![notification_center, addObserver:observer selector:sel!(spaceChanged:) name:name object:workspace];
+
 
         // SEB Mimicry: Canary in the Coal Mine
         // stationary (16) + aux (256) + disallowTile (2048) + allSpaces (1) + ignoresCycle (4)
