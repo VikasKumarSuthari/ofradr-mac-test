@@ -572,23 +572,26 @@ fn main() {
         
         // Skip CGS private API - it doesn't work reliably
         log_to_file("Skipping CGS private API (not reliable)");
-        
+        log_to_file("Setting window sharing type...");
         let _: () = msg_send![window, setSharingType: NSWindowSharingNone];
         
-        // Critical panel settings for non-activation
-        let _: () = msg_send![window, setFloatingPanel: YES];
-        let _: () = msg_send![window, setBecomesKeyOnlyIfNeeded: YES];
+        // NOTE: setFloatingPanel and setBecomesKeyOnlyIfNeeded are NSPanel-only methods
+        // We're using NSWindow now, so skip those
+        log_to_file("Setting HidesOnDeactivate to NO...");
         let _: () = msg_send![window, setHidesOnDeactivate: NO];
 
+        log_to_file("Setting collection behavior...");
         let behavior = NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary;
 
         let _: () = msg_send![window, setCollectionBehavior: behavior];
         let _: () = msg_send![window, setMovableByWindowBackground: YES];
+        log_to_file("Window behavior configured");
         
         // Store window reference for desktop change handler
         WINDOW.store(window as *mut Object, Ordering::SeqCst);
+        log_to_file("Window stored in global reference");
 
         // Create draggable content view
         let draggable_class = Class::get("DraggableView").unwrap();
