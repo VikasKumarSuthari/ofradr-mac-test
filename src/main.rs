@@ -26,10 +26,12 @@ static WINDOW: AtomicPtr<Object> = AtomicPtr::new(std::ptr::null_mut());
 static TEXT_FIELD_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DESKTOP_CHANGE_COUNT: AtomicU64 = AtomicU64::new(0);
 
-// Window levels - SEB uses NSScreenSaverWindowLevel+1, we use +2 to be above
+// Window levels
 const kCGFloatingWindowLevel: i64 = 2147483631;
 const kCGScreenSaverWindowLevel: i64 = 2147483647 - 1;
-const WINDOW_LEVEL: i64 = kCGScreenSaverWindowLevel + 2;  // Above SEB!
+// CRITICAL FIX: kCGScreenSaverWindowLevel + 2 overflows i32!
+// Use kCGMaximumWindowLevel (2147483647) which is the absolute max for i32.
+const WINDOW_LEVEL: i64 = 2147483647;  
 
 // CGS Private API - same APIs SEB uses (from CGSPrivate.h)
 // These bypass NSWindow setLevel: swizzling!
@@ -40,6 +42,7 @@ extern "C" {
     fn CGSMainConnectionID() -> u32;
     fn CGSSetWindowLevel(cid: u32, wid: u32, level: i32) -> i32;
     fn CGSOrderWindow(cid: u32, wid: u32, mode: i32, relative_to_wid: u32) -> i32;
+    fn CGSGetOnScreenWindowList(cid: u32, pid: u32, list: *mut u32, count: *mut i32) -> i32;
 }
 
 const NSWindowSharingNone: u64 = 0;
@@ -306,8 +309,9 @@ fn main() {
         ];
 
         let ns_color_class = Class::get("NSColor").unwrap();
-        let black_color: id = msg_send![ns_color_class, blackColor];
-        let _: () = msg_send![window, setBackgroundColor: black_color];
+        // Use BRIGHT RED for visibility!
+        let red_color: id = msg_send![ns_color_class, redColor];
+        let _: () = msg_send![window, setBackgroundColor: red_color];
         let _: () = msg_send![window, setOpaque: YES];
         let _: () = msg_send![window, setHasShadow: NO];
         
@@ -451,13 +455,31 @@ fn main() {
                 
                 if win_num > 0 && cgs_connection > 0 {
                     unsafe {
-                        // Use CGS private API to set level - bypasses NSWindow swizzle!
+                        // Use CGS private API to set level
                         let level = WINDOW_LEVEL as i32;
-                        let result = CGSSetWindowLevel(cgs_connection, win_num, level);
+                        let _ = CGSSetWindowLevel(cgs_connection, win_num, level);
                         
-                        // CGSOrderWindow mode 1 = kCGSOrderAbove, 0 = relative to wid 0 (all)
-                        let order_result = CGSOrderWindow(cgs_connection, win_num, 1, 0);
+                        // AGGRESSIVE: Find any window above us and climb over it
+                        let mut window_list: [u32; 200] = [0; 200];
+                        let mut count_out: i32 = 0;
+                        let list_result = CGSGetOnScreenWindowList(cgs_connection, 0, window_list.as_mut_ptr(), &mut count_out);
                         
+                        if list_result == 0 && count_out > 0 {
+                            // The list is ordered front-to-back.
+                            // If we are not first, we need to order above the first window!
+                            let top_window = window_list[0];
+                            if top_window != win_num {
+                                // Order explicitly above the top window
+                                let order_res = CGSOrderWindow(cgs_connection, win_num, 1, top_window);
+                                if count % 10 == 0 {
+                                    log_to_file(&format!("Ordering above window {}: result={}", top_window, order_res));
+                                }
+                            }
+                        } else {
+                            // Fallback: order front relative to everything
+                            let _ = CGSOrderWindow(cgs_connection, win_num, 1, 0);
+                        }
+
                         // Also use NSWindow methods as backup
                         let window = WINDOW.load(Ordering::SeqCst);
                         if !window.is_null() {
@@ -465,9 +487,9 @@ fn main() {
                             let _: () = msg_send![window, orderFrontRegardless];
                         }
                         
-                        // Log every 5th heartbeat
-                        if count % 5 == 0 {
-                            log_to_file(&format!("Heartbeat #{}: CGS level={} order={}", count, result, order_result));
+                        // Log every 10th heartbeat
+                        if count % 10 == 0 {
+                            log_to_file(&format!("Heartbeat #{}: CGS active", count));
                         }
                     }
                 }
