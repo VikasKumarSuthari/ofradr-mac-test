@@ -68,6 +68,8 @@ static REGISTER_BUTTON_HANDLER: Once = Once::new();
 static REGISTER_DRAGGABLE_VIEW: Once = Once::new();
 static REGISTER_FOCUSLESS_TEXT_FIELD: Once = Once::new();
 static REGISTER_CLICKABLE_TEXT_VIEW: Once = Once::new();
+static REGISTER_FOCUSLESS_BUTTON: Once = Once::new();
+static REGISTER_NON_ACTIVATING_PANEL: Once = Once::new();
 
 // Button action handler for close button
 extern "C" fn close_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
@@ -80,14 +82,28 @@ extern "C" fn close_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
 // Button action handler for center test button
 extern "C" fn test_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
     println!("Test button clicked!");
-    // Force window to front when test button is clicked
-    let window = WINDOW.load(Ordering::SeqCst);
-    if !window.is_null() {
-        unsafe {
-            let _: () = msg_send![window, setLevel: kCGMaximumWindowLevel];
-            let _: () = msg_send![window, orderFrontRegardless];
-        }
-    }
+}
+
+// FocuslessButton handlers - button that doesn't steal focus
+extern "C" fn button_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> bool {
+    true // Accept click without activating window
+}
+
+extern "C" fn button_accepts_first_responder(_this: &Object, _cmd: Sel) -> bool {
+    false // Don't become first responder
+}
+
+extern "C" fn button_refuses_first_responder(_this: &Object, _cmd: Sel) -> bool {
+    true // Refuse to become first responder
+}
+
+// NonActivatingPanel - panel that never becomes key window
+extern "C" fn panel_can_become_key_window(_this: &Object, _cmd: Sel) -> bool {
+    false // Never become key window - never steal focus
+}
+
+extern "C" fn panel_can_become_main_window(_this: &Object, _cmd: Sel) -> bool {
+    false // Never become main window
 }
 
 // DraggableView mouse event handlers
@@ -249,6 +265,55 @@ fn register_clickable_text_view_class() {
                 sel!(acceptsFirstMouse:),
                 clickable_view_accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> bool,
             );
+            // Prevent focus stealing
+            decl.add_method(
+                sel!(acceptsFirstResponder),
+                text_field_accepts_first_responder as extern "C" fn(&Object, Sel) -> bool,
+            );
+        }
+        
+        decl.register();
+    });
+}
+
+fn register_focusless_button_class() {
+    REGISTER_FOCUSLESS_BUTTON.call_once(|| {
+        let superclass = Class::get("NSButton").unwrap();
+        let mut decl = ClassDecl::new("FocuslessButton", superclass).unwrap();
+        
+        unsafe {
+            decl.add_method(
+                sel!(acceptsFirstMouse:),
+                button_accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> bool,
+            );
+            decl.add_method(
+                sel!(acceptsFirstResponder),
+                button_accepts_first_responder as extern "C" fn(&Object, Sel) -> bool,
+            );
+            decl.add_method(
+                sel!(refusesFirstResponder),
+                button_refuses_first_responder as extern "C" fn(&Object, Sel) -> bool,
+            );
+        }
+        
+        decl.register();
+    });
+}
+
+fn register_non_activating_panel_class() {
+    REGISTER_NON_ACTIVATING_PANEL.call_once(|| {
+        let superclass = Class::get("NSPanel").unwrap();
+        let mut decl = ClassDecl::new("NonActivatingPanel", superclass).unwrap();
+        
+        unsafe {
+            decl.add_method(
+                sel!(canBecomeKeyWindow),
+                panel_can_become_key_window as extern "C" fn(&Object, Sel) -> bool,
+            );
+            decl.add_method(
+                sel!(canBecomeMainWindow),
+                panel_can_become_main_window as extern "C" fn(&Object, Sel) -> bool,
+            );
         }
         
         decl.register();
@@ -282,6 +347,8 @@ fn main() {
         register_draggable_view_class();
         register_focusless_text_field_class();
         register_clickable_text_view_class();
+        register_focusless_button_class();
+        register_non_activating_panel_class();
 
         let app = NSApp();
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory);
@@ -291,8 +358,8 @@ fn main() {
             NSSize::new(400.0, 300.0),
         );
 
-        // Create an NSPanel instead of NSWindow for non-activating behavior
-        let panel_class = Class::get("NSPanel").unwrap();
+        // Create NonActivatingPanel - custom panel that never steals focus
+        let panel_class = Class::get("NonActivatingPanel").unwrap();
         let window: id = msg_send![panel_class, alloc];
         let window: id = msg_send![window, 
             initWithContentRect:frame 
@@ -319,6 +386,7 @@ fn main() {
         // Make window non-activating - clicks won't steal focus from other apps
         let _: () = msg_send![window, setFloatingPanel: YES];
         let _: () = msg_send![window, setBecomesKeyOnlyIfNeeded: YES];
+        let _: () = msg_send![window, setWorksWhenModal: YES];
         
         // CRITICAL: Hide from app switcher and keep on top
         let _: () = msg_send![window, setHidesOnDeactivate: NO];
@@ -344,8 +412,8 @@ fn main() {
         let handler_class = Class::get("ButtonHandler").unwrap();
         let handler: id = msg_send![handler_class, new];
 
-        // Create Close button (top-right corner)
-        let button_class = Class::get("NSButton").unwrap();
+        // Create Close button (top-right corner) - uses FocuslessButton to not steal focus
+        let button_class = Class::get("FocuslessButton").unwrap();
         let close_button: id = msg_send![button_class, alloc];
         let close_button_frame = NSRect::new(NSPoint::new(340.0, 260.0), NSSize::new(50.0, 30.0));
         let close_button: id = msg_send![close_button, initWithFrame: close_button_frame];
@@ -354,9 +422,10 @@ fn main() {
         let _: () = msg_send![close_button, setBezelStyle: NSBezelStyleRounded];
         let _: () = msg_send![close_button, setTarget: handler];
         let _: () = msg_send![close_button, setAction: sel!(closeButtonClicked:)];
+        let _: () = msg_send![close_button, setRefusesFirstResponder: YES];
         let _: () = msg_send![draggable_view, addSubview: close_button];
 
-        // Create Test button (right of center)
+        // Create Test button (right of center) - uses FocuslessButton to not steal focus
         let test_button: id = msg_send![button_class, alloc];
         let test_button_frame = NSRect::new(NSPoint::new(280.0, 135.0), NSSize::new(100.0, 30.0));
         let test_button: id = msg_send![test_button, initWithFrame: test_button_frame];
@@ -365,6 +434,7 @@ fn main() {
         let _: () = msg_send![test_button, setBezelStyle: NSBezelStyleRounded];
         let _: () = msg_send![test_button, setTarget: handler];
         let _: () = msg_send![test_button, setAction: sel!(testButtonClicked:)];
+        let _: () = msg_send![test_button, setRefusesFirstResponder: YES];
         let _: () = msg_send![draggable_view, addSubview: test_button];
 
         // Create Focusless Text Field for input
