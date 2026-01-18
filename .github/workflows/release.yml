@@ -25,6 +25,7 @@ jobs:
       run: |
         codesign --force --deep --sign - GhostMac.app
         chmod +x GhostMac.app/Contents/MacOS/ghostmac
+        xattr -cr GhostMac.app
 
     - name: Create DMG
       run: |
