@@ -75,7 +75,7 @@ static REGISTER_NON_ACTIVATING_PANEL: Once = Once::new();
 static REGISTER_SPACE_CHANGE_HANDLER: Once = Once::new();
 static REGISTER_FOCUSLESS_BUTTON: Once = Once::new();
 
-// ---------------- LOGGING ----------------
+// ---------------- LOGGING & DETECTION ----------------
 
 fn log_to_file(message: &str) {
     // Get home directory and create log path
@@ -104,6 +104,126 @@ fn log_to_file(message: &str) {
     println!("{}", message);
 }
 
+// Get current space/desktop information
+fn get_current_space_info() -> (String, String) {
+    unsafe {
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        
+        // Get active space UUID (might be random string in SEB)
+        let active_space: id = msg_send![workspace, activeSpace];
+        
+        let space_uuid: String = if active_space != nil {
+            let uuid: id = msg_send![active_space, uuid];
+            if uuid != nil {
+                let c_str: *const i8 = msg_send![uuid, UTF8String];
+                if !c_str.is_null() {
+                    std::ffi::CStr::from_ptr(c_str).to_string_lossy().to_string()
+                } else {
+                    "unknown-uuid".to_string()
+                }
+            } else {
+                "no-uuid".to_string()
+            }
+        } else {
+            "no-active-space".to_string()
+        };
+        
+        // Get localized name if available
+        let space_name: String = if active_space != nil {
+            let name: id = msg_send![active_space, localizedName];
+            if name != nil {
+                let c_str: *const i8 = msg_send![name, UTF8String];
+                if !c_str.is_null() {
+                    std::ffi::CStr::from_ptr(c_str).to_string_lossy().to_string()
+                } else {
+                    "unnamed".to_string()
+                }
+            } else {
+                "no-name".to_string()
+            }
+        } else {
+            "unknown".to_string()
+        };
+        
+        (space_uuid, space_name)
+    }
+}
+
+// Check if SEB (Safe Exam Browser) is running
+fn is_seb_running() -> bool {
+    unsafe {
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let running_apps: id = msg_send![workspace, runningApplications];
+        let count: usize = msg_send![running_apps, count];
+        
+        for i in 0..count {
+            let app: id = msg_send![running_apps, objectAtIndex: i];
+            let bundle_id: id = msg_send![app, bundleIdentifier];
+            if bundle_id != nil {
+                let c_str: *const i8 = msg_send![bundle_id, UTF8String];
+                if !c_str.is_null() {
+                    let bundle_str = std::ffi::CStr::from_ptr(c_str).to_string_lossy();
+                    if bundle_str.contains("org.safeexambrowser") || bundle_str.contains("SafeExamBrowser") {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
+// Get frontmost application info
+fn get_frontmost_app() -> (String, String) {
+    unsafe {
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let frontmost: id = msg_send![workspace, frontmostApplication];
+        
+        if frontmost == nil {
+            return ("unknown".to_string(), "unknown".to_string());
+        }
+        
+        let app_name: id = msg_send![frontmost, localizedName];
+        let bundle_id: id = msg_send![frontmost, bundleIdentifier];
+        
+        let name = if app_name != nil {
+            let c_str: *const i8 = msg_send![app_name, UTF8String];
+            if !c_str.is_null() {
+                std::ffi::CStr::from_ptr(c_str).to_string_lossy().to_string()
+            } else {
+                "unknown".to_string()
+            }
+        } else {
+            "unknown".to_string()
+        };
+        
+        let bundle = if bundle_id != nil {
+            let c_str: *const i8 = msg_send![bundle_id, UTF8String];
+            if !c_str.is_null() {
+                std::ffi::CStr::from_ptr(c_str).to_string_lossy().to_string()
+            } else {
+                "unknown".to_string()
+            }
+        } else {
+            "unknown".to_string()
+        };
+        
+        (name, bundle)
+    }
+}
+
+// Log comprehensive system state
+fn log_system_state(event: &str) {
+    let (space_uuid, space_name) = get_current_space_info();
+    let (app_name, app_bundle) = get_frontmost_app();
+    let seb_running = is_seb_running();
+    
+    log_to_file(&format!(
+        "=== {} ===\n  Space UUID: {}\n  Space Name: {}\n  Frontmost App: {} ({})\n  SEB Running: {}",
+        event, space_uuid, space_name, app_name, app_bundle, seb_running
+    ));
+}
+
 // ---------------- BUTTON HANDLERS ----------------
 
 extern "C" fn close_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
@@ -121,7 +241,9 @@ extern "C" fn test_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
 
 extern "C" fn space_did_change(_this: &Object, _cmd: Sel, _notification: id) {
     let count = DESKTOP_CHANGE_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
-    log_to_file(&format!("Desktop/Space changed! Count: {}", count));
+    
+    // Log comprehensive state
+    log_system_state(&format!("DESKTOP CHANGE #{}", count));
     
     // Reassert window visibility on space change
     unsafe {
@@ -137,16 +259,15 @@ extern "C" fn space_did_change(_this: &Object, _cmd: Sel, _notification: id) {
             // Also try CGS private API
             let window_number: i64 = msg_send![window, windowNumber];
             let cgs_connection = CGSMainConnectionID();
-            let _ = CGSSetWindowLevel(cgs_connection, window_number as u32, window_level + 1000);
+            let cgs_result = CGSSetWindowLevel(cgs_connection, window_number as u32, window_level + 1000);
             
-            log_to_file(&format!("Window level reasserted to {} and brought to front", window_level));
+            log_to_file(&format!("  Window #{} level set to {} (CGS result: {})", window_number, window_level, cgs_result));
         }
     }
     
     thread::spawn(move || {
-        log_to_file(&format!("[Thread {}] Handling desktop change...", count));
         std::thread::sleep(std::time::Duration::from_millis(100));
-        log_to_file(&format!("[Thread {}] Desktop change handled.", count));
+        log_to_file(&format!("[Thread {}] Desktop change processed", count));
     });
 }
 
@@ -627,7 +748,9 @@ fn main() {
         let _: () = msg_send![window, center];
         let _: () = msg_send![window, orderFrontRegardless];
 
-        log_to_file("App started - NonActivatingPanel with kCGMaximumWindowLevel");
+        // Log comprehensive startup state
+        log_system_state("APP STARTUP");
+        log_to_file("Window created with Assistive Tech High level + CGS boost");
 
         app.run();
     }
