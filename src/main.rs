@@ -249,19 +249,14 @@ extern "C" fn space_did_change(_this: &Object, _cmd: Sel, _notification: id) {
     unsafe {
         let window = WINDOW.load(Ordering::SeqCst);
         if !window.is_null() {
-            // Use MAXIMUM window level (2147483647)
-            let window_level = kCGMaximumWindowLevel;
+            // Use SEB's technique: NSScreenSaverWindowLevel + 2
+            let window_level = kCGScreenSaverWindowLevel + 2;
             
             // Reassert level and bring to front
             let _: () = msg_send![window, setLevel: window_level];
             let _: () = msg_send![window, orderFrontRegardless];
             
-            // Also try CGS private API
-            let window_number: i64 = msg_send![window, windowNumber];
-            let cgs_connection = CGSMainConnectionID();
-            let cgs_result = CGSSetWindowLevel(cgs_connection, window_number as u32, window_level);
-            
-            log_to_file(&format!("  Window #{} level set to {} (CGS result: {})", window_number, window_level, cgs_result));
+            log_to_file(&format!("  Window level reasserted to {}", window_level));
         }
     }
     
@@ -538,12 +533,13 @@ fn main() {
             NSSize::new(400.0, 300.0),
         );
 
-        // Use NonActivatingPanel with NSNonactivatingPanelMask - like WS_EX_NOACTIVATE on Windows
-        let panel_class = Class::get("NonActivatingPanel").unwrap();
-        let window: id = msg_send![panel_class, alloc];
+        // Use regular NSWindow (not NSPanel) for reliable visibility
+        // NSPanel with NonActivatingPanelMask might be preventing display
+        let window_class = Class::get("NSWindow").unwrap();
+        let window: id = msg_send![window_class, alloc];
         
-        // CRITICAL: NSNonactivatingPanelMask (128) prevents the panel from activating the application
-        let style_mask = NSWindowStyleMask::NSBorderlessWindowMask.bits() | NSNonactivatingPanelMask;
+        // Simple borderless style mask
+        let style_mask = NSWindowStyleMask::NSBorderlessWindowMask;
         
         let window: id = msg_send![window,
             initWithContentRect:frame
@@ -551,46 +547,31 @@ fn main() {
             backing:NSBackingStoreType::NSBackingStoreBuffered
             defer:NO
         ];
+        
+        log_to_file("Window created with NSWindow (not NSPanel)");
 
         let ns_color_class = Class::get("NSColor").unwrap();
-        let black_color: id = msg_send![ns_color_class, blackColor];
-        let _: () = msg_send![window, setBackgroundColor: black_color];
+        // Use BRIGHT RED so it's very visible!
+        let red_color: id = msg_send![ns_color_class, redColor];
+        let _: () = msg_send![window, setBackgroundColor: red_color];
         let _: () = msg_send![window, setOpaque: YES];
-        let _: () = msg_send![window, setHasShadow: NO];
+        let _: () = msg_send![window, setHasShadow: YES];  // Add shadow to help see it
+        let _: () = msg_send![window, setAlphaValue: 1.0_f64];  // Fully opaque
         
-        // Try multiple window level approaches to appear above SEB
-        let mut window_level: i64;
-        if USE_ASSISTIVE_LEVEL {
-            // Try to get Assistive Tech High window level - might work above secure apps
-            window_level = CGWindowLevelForKey(kCGAssistiveTechHighWindowLevelKey);
-            log_to_file(&format!("CGWindowLevelForKey returned: {}", window_level));
-            
-            // Fallback if it returns 0 or negative
-            if window_level <= 0 {
-                window_level = kCGMaximumWindowLevel;
-                log_to_file(&format!("Fallback to kCGMaximumWindowLevel: {}", window_level));
-            }
-        } else {
-            window_level = kCGMaximumWindowLevel;
-            log_to_file(&format!("Using Maximum window level: {}", window_level));
-        }
+        // Use SEB's technique: NSScreenSaverWindowLevel + 2 (SEB uses +1, we use +2 to be above)
+        // From SEB source: they remap levels to NSScreenSaverWindowLevel+1
+        let window_level: i64 = kCGScreenSaverWindowLevel + 2;
+        log_to_file(&format!("Using window level: {} (kCGScreenSaverWindowLevel+2)", window_level));
         
         let _: () = msg_send![window, setLevel: window_level];
-        log_to_file(&format!("Window level set to: {}", window_level));
+        log_to_file("Window level set successfully");
         
-        // Also try the private CGS API to set window level (may fail, that's OK)
+        // Get window number for logging
         let window_number: i64 = msg_send![window, windowNumber];
         log_to_file(&format!("Window number: {}", window_number));
         
-        let cgs_connection = CGSMainConnectionID();
-        log_to_file(&format!("CGS connection: {}", cgs_connection));
-        
-        if cgs_connection != 0 && window_number > 0 {
-            let cgs_result = CGSSetWindowLevel(cgs_connection, window_number as u32, window_level);
-            log_to_file(&format!("CGSSetWindowLevel result: {} (0=success)", cgs_result));
-        } else {
-            log_to_file("Skipping CGS API - invalid connection or window number");
-        }
+        // Skip CGS private API - it doesn't work reliably
+        log_to_file("Skipping CGS private API (not reliable)");
         
         let _: () = msg_send![window, setSharingType: NSWindowSharingNone];
         
@@ -761,11 +742,24 @@ fn main() {
         let _local_monitor: id = msg_send![ns_event_class, addLocalMonitorForEventsMatchingMask:mask handler:&*local_block];
 
         let _: () = msg_send![window, center];
+        
+        // EXPLICITLY show the window with multiple methods
+        let _: () = msg_send![window, setIsVisible: YES];
+        let _: () = msg_send![window, makeKeyAndOrderFront: nil];
         let _: () = msg_send![window, orderFrontRegardless];
+        let _: () = msg_send![window, display];
+        
+        log_to_file("Window visibility commands sent: setIsVisible, makeKeyAndOrderFront, orderFrontRegardless, display");
+        
+        // Get window frame to log where it should appear
+        let window_frame: NSRect = msg_send![window, frame];
+        log_to_file(&format!("Window frame: x={}, y={}, w={}, h={}", 
+            window_frame.origin.x, window_frame.origin.y, 
+            window_frame.size.width, window_frame.size.height));
 
         // Log comprehensive startup state
         log_system_state("APP STARTUP");
-        log_to_file("Window created with Maximum window level");
+        log_to_file("Window created with Maximum window level and RED background");
         
         // Start heartbeat thread to continuously log status (even when SEB is running)
         thread::spawn(|| {
