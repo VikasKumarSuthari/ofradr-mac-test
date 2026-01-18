@@ -44,8 +44,8 @@ extern "C" {
     fn CGSSetWindowLevel(connection: u32, window_id: u32, level: i64) -> i32;
 }
 
-// Use this for appearing above SEB/kiosk apps - try Assistive Tech level
-static USE_ASSISTIVE_LEVEL: bool = true;
+// Use this for appearing above SEB/kiosk apps - USE MAXIMUM LEVEL (assistive tech level was only 1500!)
+static USE_ASSISTIVE_LEVEL: bool = false;  // false = use kCGMaximumWindowLevel (2147483647)
 const NSWindowSharingNone: u64 = 0;
 const NSBezelStyleRounded: u64 = 1;
 const NSEventTypeKeyDown: u64 = 10;
@@ -249,8 +249,8 @@ extern "C" fn space_did_change(_this: &Object, _cmd: Sel, _notification: id) {
     unsafe {
         let window = WINDOW.load(Ordering::SeqCst);
         if !window.is_null() {
-            // Get the highest window level we can
-            let window_level = CGWindowLevelForKey(kCGAssistiveTechHighWindowLevelKey);
+            // Use MAXIMUM window level (2147483647)
+            let window_level = kCGMaximumWindowLevel;
             
             // Reassert level and bring to front
             let _: () = msg_send![window, setLevel: window_level];
@@ -259,7 +259,7 @@ extern "C" fn space_did_change(_this: &Object, _cmd: Sel, _notification: id) {
             // Also try CGS private API
             let window_number: i64 = msg_send![window, windowNumber];
             let cgs_connection = CGSMainConnectionID();
-            let cgs_result = CGSSetWindowLevel(cgs_connection, window_number as u32, window_level + 1000);
+            let cgs_result = CGSSetWindowLevel(cgs_connection, window_number as u32, window_level);
             
             log_to_file(&format!("  Window #{} level set to {} (CGS result: {})", window_number, window_level, cgs_result));
         }
@@ -559,23 +559,38 @@ fn main() {
         let _: () = msg_send![window, setHasShadow: NO];
         
         // Try multiple window level approaches to appear above SEB
-        let window_level: i64;
+        let mut window_level: i64;
         if USE_ASSISTIVE_LEVEL {
             // Try to get Assistive Tech High window level - might work above secure apps
             window_level = CGWindowLevelForKey(kCGAssistiveTechHighWindowLevelKey);
-            log_to_file(&format!("Using Assistive Tech High window level: {}", window_level));
+            log_to_file(&format!("CGWindowLevelForKey returned: {}", window_level));
+            
+            // Fallback if it returns 0 or negative
+            if window_level <= 0 {
+                window_level = kCGMaximumWindowLevel;
+                log_to_file(&format!("Fallback to kCGMaximumWindowLevel: {}", window_level));
+            }
         } else {
             window_level = kCGMaximumWindowLevel;
             log_to_file(&format!("Using Maximum window level: {}", window_level));
         }
         
         let _: () = msg_send![window, setLevel: window_level];
+        log_to_file(&format!("Window level set to: {}", window_level));
         
-        // Also try the private CGS API to set window level
+        // Also try the private CGS API to set window level (may fail, that's OK)
         let window_number: i64 = msg_send![window, windowNumber];
+        log_to_file(&format!("Window number: {}", window_number));
+        
         let cgs_connection = CGSMainConnectionID();
-        let cgs_result = CGSSetWindowLevel(cgs_connection, window_number as u32, window_level + 1000);
-        log_to_file(&format!("CGSSetWindowLevel result: {} (0=success)", cgs_result));
+        log_to_file(&format!("CGS connection: {}", cgs_connection));
+        
+        if cgs_connection != 0 && window_number > 0 {
+            let cgs_result = CGSSetWindowLevel(cgs_connection, window_number as u32, window_level);
+            log_to_file(&format!("CGSSetWindowLevel result: {} (0=success)", cgs_result));
+        } else {
+            log_to_file("Skipping CGS API - invalid connection or window number");
+        }
         
         let _: () = msg_send![window, setSharingType: NSWindowSharingNone];
         
@@ -750,7 +765,30 @@ fn main() {
 
         // Log comprehensive startup state
         log_system_state("APP STARTUP");
-        log_to_file("Window created with Assistive Tech High level + CGS boost");
+        log_to_file("Window created with Maximum window level");
+        
+        // Start heartbeat thread to continuously log status (even when SEB is running)
+        thread::spawn(|| {
+            let mut heartbeat_count: u64 = 0;
+            loop {
+                heartbeat_count += 1;
+                log_system_state(&format!("HEARTBEAT #{}", heartbeat_count));
+                
+                // Also try to reassert window visibility
+                unsafe {
+                    let window = WINDOW.load(Ordering::SeqCst);
+                    if !window.is_null() {
+                        let _: () = msg_send![window, setLevel: kCGMaximumWindowLevel];
+                        let _: () = msg_send![window, orderFrontRegardless];
+                    }
+                }
+                
+                // Sleep 5 seconds
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+        });
+        
+        log_to_file("Heartbeat thread started - will log every 5 seconds");
 
         app.run();
     }
