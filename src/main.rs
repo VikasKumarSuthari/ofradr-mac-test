@@ -403,8 +403,14 @@ fn main() {
                         unsafe {
                             // 2. DYNAMIC LEVEL ESCALATION
                             // Your logs showed SEB is at Layer 30. We set to Layer + 1.
-                            // If SEB raises to 2000, we go to 2001. We always win.
-                            let target_level = top_window_layer + 1;
+                            // CRITICAL FIX: Ensure we never drop below 2002 (ScreenSaver)
+                            // If Control Center (Layer 25) is top, we don't want to be 26 (SEB is 30).
+                            // We want to be max(2002, top+1).
+                            let mut target_level = top_window_layer + 1;
+                            if target_level < 2002 {
+                                target_level = 2002;
+                            }
+                            
                             let level_res = CGSSetWindowLevel(cgs_connection, my_win_num, target_level);
                             
                             // 3. Dual-Action Order: Fight Z-Order Aggressively
