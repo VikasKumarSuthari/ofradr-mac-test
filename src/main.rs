@@ -331,7 +331,7 @@ fn main() {
                     if key_code == kVK_Delete {
                         let length: usize = msg_send![mutable_string, length];
                         if length > 0 {
-                            let range = cocoa::foundation::NSRange::new(length - 1, 1);
+                            let range = cocoa::foundation::NSRange::new((length - 1) as u64, 1);
                             let _: () = msg_send![mutable_string, deleteCharactersInRange: range];
                         }
                     } else if key_code == kVK_Return {
