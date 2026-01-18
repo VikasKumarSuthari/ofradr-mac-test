@@ -363,8 +363,6 @@ fn main() {
                             // Get Window ID
                             let k_number = CFString::new("kCGWindowNumber");
                             if let Some(num_obj) = dic.find(&k_number) {
-                                // Explicitly state type to help inference
-                                let num_obj: CFType = num_obj;
                                 let num_ref = num_obj.as_CFTypeRef() as core_foundation::number::CFNumberRef;
                                 let num = unsafe { CFNumber::wrap_under_get_rule(num_ref) };
                                 if let Some(wid) = num.to_i32() {
