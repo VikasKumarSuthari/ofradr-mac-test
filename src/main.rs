@@ -14,12 +14,14 @@ use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
 use objc::runtime::{Class, Object, Sel, BOOL};
 use objc::declare::ClassDecl;
 use std::sync::Once;
-use std::sync::atomic::{AtomicPtr, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicBool, AtomicU64, Ordering};
+use std::thread;
 
 // ---------------- GLOBAL STATE ----------------
 
 static TEXT_FIELD: AtomicPtr<Object> = AtomicPtr::new(std::ptr::null_mut());
 static TEXT_FIELD_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DESKTOP_CHANGE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 const kCGFloatingWindowLevel: i64 = 2147483631;
 const NSWindowSharingNone: u64 = 0;
@@ -47,6 +49,7 @@ static REGISTER_DRAGGABLE_VIEW: Once = Once::new();
 static REGISTER_FOCUSLESS_TEXT_FIELD: Once = Once::new();
 static REGISTER_NON_ACTIVATING_PANEL: Once = Once::new();
 static REGISTER_FOCUSLESS_BUTTON: Once = Once::new();
+static REGISTER_SPACE_CHANGE_HANDLER: Once = Once::new();
 
 // ---------------- BUTTON HANDLERS ----------------
 
@@ -59,6 +62,33 @@ extern "C" fn close_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
 
 extern "C" fn test_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
     println!("Test button clicked!");
+}
+
+// ---------------- SPACE/DESKTOP CHANGE HANDLER ----------------
+
+extern "C" fn space_did_change(_this: &Object, _cmd: Sel, _notification: id) {
+    // Increment counter
+    let count = DESKTOP_CHANGE_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+    println!("Desktop/Space changed! Count: {}", count);
+    
+    // Spawn a new thread to handle the desktop change
+    thread::spawn(move || {
+        println!("[Thread {}] Handling desktop change...", count);
+        
+        // You can add any logic here that should run on desktop change
+        // For example: re-assert window visibility, refresh state, etc.
+        
+        unsafe {
+            // Brief delay to let the space transition complete
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            
+            // Force window to front on new space
+            // Note: This runs on a separate thread, so we need to be careful
+            // The actual window operations should happen on main thread
+        }
+        
+        println!("[Thread {}] Desktop change handled.", count);
+    });
 }
 
 // ---------------- NON-ACTIVATING PANEL (like WS_EX_NOACTIVATE) ----------------
@@ -79,6 +109,34 @@ extern "C" fn button_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) 
 
 extern "C" fn button_accepts_first_responder(_this: &Object, _cmd: Sel) -> BOOL {
     NO // Don't become first responder
+}
+
+extern "C" fn button_needs_panel_to_become_key(_this: &Object, _cmd: Sel) -> BOOL {
+    NO // Don't require panel to become key window
+}
+
+// Custom mouseDown that sends action WITHOUT activating window
+extern "C" fn button_mouse_down(this: &Object, _cmd: Sel, event: id) {
+    unsafe {
+        // Get target and action from the button
+        let target: id = msg_send![this, target];
+        let action: Sel = msg_send![this, action];
+        
+        // Highlight the button briefly
+        let _: () = msg_send![this, highlight: YES];
+        
+        // Send the action directly without calling super (which would activate window)
+        if target != nil {
+            let _: () = msg_send![target, performSelector:action withObject:this];
+        }
+        
+        // Un-highlight after action
+        let _: () = msg_send![this, highlight: NO];
+    }
+}
+
+extern "C" fn button_mouse_up(_this: &Object, _cmd: Sel, _event: id) {
+    // Do nothing - action already sent in mouseDown
 }
 
 // ---------------- DRAGGABLE BACKGROUND ----------------
@@ -175,6 +233,19 @@ fn register_focusless_button_class() {
                 sel!(acceptsFirstResponder),
                 button_accepts_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
             );
+            decl.add_method(
+                sel!(needsPanelToBecomeKey),
+                button_needs_panel_to_become_key as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+            // Override mouseDown to prevent window activation
+            decl.add_method(
+                sel!(mouseDown:),
+                button_mouse_down as extern "C" fn(&Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(mouseUp:),
+                button_mouse_up as extern "C" fn(&Object, Sel, id),
+            );
         }
 
         decl.register();
@@ -250,6 +321,21 @@ fn register_focusless_text_field_class() {
     });
 }
 
+fn register_space_change_handler_class() {
+    REGISTER_SPACE_CHANGE_HANDLER.call_once(|| {
+        let superclass = Class::get("NSObject").unwrap();
+        let mut decl = ClassDecl::new("SpaceChangeHandler", superclass).unwrap();
+
+        unsafe {
+            decl.add_method(
+                sel!(spaceDidChange:),
+                space_did_change as extern "C" fn(&Object, Sel, id),
+            );
+        }
+        decl.register();
+    });
+}
+
 // ---------------- KEY FILTER ----------------
 
 fn should_pass_through_key(key_code: u16, modifier_flags: u64) -> bool {
@@ -285,6 +371,24 @@ fn main() {
         register_button_handler_class();
         register_draggable_view_class();
         register_focusless_text_field_class();
+        register_space_change_handler_class();
+
+        // Set up Desktop/Space change notification observer
+        let space_handler_class = Class::get("SpaceChangeHandler").unwrap();
+        let space_handler: id = msg_send![space_handler_class, new];
+        
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let notification_center: id = msg_send![workspace, notificationCenter];
+        
+        // NSWorkspaceActiveSpaceDidChangeNotification
+        let notification_name = NSString::alloc(nil).init_str("NSWorkspaceActiveSpaceDidChangeNotification");
+        let _: () = msg_send![notification_center, 
+            addObserver:space_handler 
+            selector:sel!(spaceDidChange:) 
+            name:notification_name 
+            object:nil
+        ];
+        println!("Desktop/Space change observer registered.");
 
         let app = NSApp();
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory);
