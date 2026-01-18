@@ -8,3 +8,5 @@ cocoa           = "0.25"
 core-foundation = "0.9"
 core-graphics   = "0.23"
 objc            = "0.2"
+block           = "0.1"
+
