@@ -47,8 +47,8 @@ fn main() {
             false,
         );
 
-        window.setBackgroundColor_(NSColor::clearColor(nil));
-        window.setOpaque_(false);
+        window.setBackgroundColor_(NSColor::blackColor(nil));
+        window.setOpaque_(true);
         window.setHasShadow_(false);
         window.setLevel_(kCGFloatingWindowLevel);
         
