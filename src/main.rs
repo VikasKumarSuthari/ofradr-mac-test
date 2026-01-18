@@ -6,7 +6,7 @@ use cocoa::appkit::{
 };
 use cocoa::base::nil;
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize};
-use core_graphics::display::CGMainDisplayID;
+
 use std::ffi::c_void;
 use std::thread;
 
@@ -47,7 +47,7 @@ fn main() {
             false,
         );
 
-        window.setBackgroundColor_(NSColor::blackColor(nil));
+        window.setBackgroundColor_(<dyn NSColor>::blackColor(nil));
         window.setOpaque_(true);
         window.setHasShadow_(false);
         window.setLevel_(kCGFloatingWindowLevel);
