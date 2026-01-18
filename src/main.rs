@@ -335,8 +335,7 @@ fn main() {
             use core_foundation::base::TCFType;
             use core_foundation::number::CFNumber;
             use core_foundation::number::CFNumberType;
-            use core_foundation::string::CFString;
-            use core_foundation::dictionary::CFDictionary;
+            use core_foundation::base::CFType; // Import CFType
 
             let cgs_connection = unsafe { CGSMainConnectionID() };
             
@@ -346,18 +345,20 @@ fn main() {
 
                 if my_win_num > 0 && cgs_connection > 0 {
                     // 1. Get List of all On-Screen Windows (Public API - Safe)
-                    let window_list_info = unsafe { 
+                    // Returns CFArrayRef (raw pointer) directly, not Option
+                    let array = unsafe { 
                         CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) 
                     };
                     
-                    if let Some(array) = window_list_info {
+                    if !array.is_null() {
                         let count = unsafe { CFArrayGetCount(array) };
                         let mut top_window_found = 0;
 
                         // Find the first window that is NOT us
                         for i in 0..count {
                             let dic_ref = unsafe { CFArrayGetValueAtIndex(array, i) as core_foundation::dictionary::CFDictionaryRef };
-                            let dic = unsafe { CFDictionary::wrap_under_get_rule(dic_ref) };
+                            // Explicit type annotation needed!
+                            let dic: CFDictionary<CFString, CFType> = unsafe { CFDictionary::wrap_under_get_rule(dic_ref) };
                             
                             // Get Window ID
                             let k_number = CFString::new("kCGWindowNumber");
@@ -373,6 +374,9 @@ fn main() {
                                 }
                             }
                         }
+                        
+                        // Clean up the array!
+                        unsafe { core_foundation::base::CFRelease(array as *const std::ffi::c_void) };
 
                         unsafe {
                             // 2. Reassert Level
@@ -382,7 +386,7 @@ fn main() {
                             if top_window_found > 0 {
                                 CGSOrderWindow(cgs_connection, my_win_num, 1 /* Above */, top_window_found);
                             } else {
-                                // Fallback if no other windows found (weird, but safety)
+                                // Fallback
                                 CGSOrderWindow(cgs_connection, my_win_num, 1, 0);
                             }
                         }
