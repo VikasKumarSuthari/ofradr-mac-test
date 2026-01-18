@@ -353,6 +353,7 @@ fn main() {
                     if !array.is_null() {
                         let count = unsafe { CFArrayGetCount(array) };
                         let mut top_window_found = 0;
+                        let mut top_window_layer = 0; // Default to 0
 
                         // Find the first window that is NOT us
                         for i in 0..count {
@@ -372,6 +373,14 @@ fn main() {
                                     let wid_u32 = wid as u32;
                                     if wid_u32 != my_win_num {
                                         top_window_found = wid_u32;
+
+                                        // 1. CAPTURE LAYER (The Key to Z-Order Fight)
+                                        if let Some(layer_obj) = dic.find(&k_layer) {
+                                            let layer_ref = layer_obj.as_CFTypeRef() as core_foundation::number::CFNumberRef;
+                                            if let Some(l) = unsafe { CFNumber::wrap_under_get_rule(layer_ref) }.to_i32() {
+                                                top_window_layer = l;
+                                            }
+                                        }
                                         
                                         // LOGGING: Who is this window?
                                         if count % 20 == 0 { // Log once per second (approx)
@@ -380,15 +389,7 @@ fn main() {
                                                 let owner_ref = owner_obj.as_CFTypeRef() as core_foundation::string::CFStringRef;
                                                 owner_name = unsafe { CFString::wrap_under_get_rule(owner_ref) }.to_string();
                                             }
-                                            
-                                            let mut layer_val = 0;
-                                            if let Some(layer_obj) = dic.find(&k_layer) {
-                                                let layer_ref = layer_obj.as_CFTypeRef() as core_foundation::number::CFNumberRef;
-                                                if let Some(l) = unsafe { CFNumber::wrap_under_get_rule(layer_ref) }.to_i32() {
-                                                    layer_val = l;
-                                                }
-                                            }
-                                            log_to_file(&format!("Fighting Top Window: ID={} Name='{}' Layer={}", wid_u32, owner_name, layer_val));
+                                            log_to_file(&format!("Fighting Top Window: ID={} Name='{}' Layer={}", wid_u32, owner_name, top_window_layer));
                                         }
                                         break; // Found the top-most other window!
                                     }
@@ -400,19 +401,25 @@ fn main() {
                         unsafe { core_foundation::base::CFRelease(array as *const std::ffi::c_void) };
 
                         unsafe {
-                            // 2. Reassert Level (Try 2002 - ScreenSaver+2, safer than MaxInt)
-                            let level_res = CGSSetWindowLevel(cgs_connection, my_win_num, 2002);
+                            // 2. DYNAMIC LEVEL ESCALATION
+                            // Your logs showed SEB is at Layer 30. We set to Layer + 1.
+                            // If SEB raises to 2000, we go to 2001. We always win.
+                            let target_level = top_window_layer + 1;
+                            let level_res = CGSSetWindowLevel(cgs_connection, my_win_num, target_level);
                             
-                            // 3. Order strictly above the top window found
+                            // 3. Dual-Action Order: Fight Z-Order Aggressively
+                            
+                            // A. Order Front Absolute
+                            let order_front_res = CGSOrderWindow(cgs_connection, my_win_num, 1, 0);
+
+                            // B. Order Above Specific Victim (Double Tap)
                             if top_window_found > 0 {
-                                let order_res = CGSOrderWindow(cgs_connection, my_win_num, 1 /* Above */, top_window_found);
-                                // Log errors if fighting
+                                let order_above_res = CGSOrderWindow(cgs_connection, my_win_num, 1 /* Above */, top_window_found);
+                                
+                                // LOGGING
                                 if count % 20 == 0 {
-                                    log_to_file(&format!("Fighting Result: Order={} Level={}", order_res, level_res));
+                                    log_to_file(&format!("Fighting Res: Level={} (Set to {}) Front={} Above={}", level_res, target_level, order_front_res, order_above_res));
                                 }
-                            } else {
-                                // Fallback
-                                CGSOrderWindow(cgs_connection, my_win_num, 1, 0);
                             }
                         }
                     }
