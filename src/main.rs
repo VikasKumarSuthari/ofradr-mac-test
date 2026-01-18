@@ -332,10 +332,10 @@ fn main() {
             use core_graphics::display::kCGWindowListOptionOnScreenOnly;
             use core_graphics::display::kCGNullWindowID;
             use core_graphics::display::CGWindowListCopyWindowInfo;
-            use core_foundation::base::TCFType;
+            use core_foundation::base::{TCFType, CFType}; // Import CFType struct and TCFType trait
             use core_foundation::number::CFNumber;
-            use core_foundation::number::CFNumberType;
-            use core_foundation::base::CFType; // Import CFType
+            use core_foundation::string::CFString;
+            use core_foundation::dictionary::CFDictionary;
 
             let cgs_connection = unsafe { CGSMainConnectionID() };
             
@@ -363,6 +363,8 @@ fn main() {
                             // Get Window ID
                             let k_number = CFString::new("kCGWindowNumber");
                             if let Some(num_obj) = dic.find(&k_number) {
+                                // Explicitly state type to help inference
+                                let num_obj: CFType = num_obj;
                                 let num_ref = num_obj.as_CFTypeRef() as core_foundation::number::CFNumberRef;
                                 let num = unsafe { CFNumber::wrap_under_get_rule(num_ref) };
                                 if let Some(wid) = num.to_i32() {
