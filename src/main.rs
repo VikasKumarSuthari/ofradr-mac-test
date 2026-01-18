@@ -16,14 +16,23 @@ use objc::declare::ClassDecl;
 use std::sync::Once;
 use std::sync::atomic::{AtomicPtr, AtomicBool, AtomicU64, Ordering};
 use std::thread;
+use std::fs::OpenOptions;
+use std::io::Write;
 
 // ---------------- GLOBAL STATE ----------------
 
 static TEXT_FIELD: AtomicPtr<Object> = AtomicPtr::new(std::ptr::null_mut());
+static WINDOW: AtomicPtr<Object> = AtomicPtr::new(std::ptr::null_mut());
 static TEXT_FIELD_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DESKTOP_CHANGE_COUNT: AtomicU64 = AtomicU64::new(0);
 
-const kCGFloatingWindowLevel: i64 = 2147483631;
+// Window levels - higher = more on top
+const kCGFloatingWindowLevel: i64 = 2147483631;       // Normal floating
+const kCGScreenSaverWindowLevel: i64 = 2147483647 - 1; // Very high - above most apps
+const kCGMaximumWindowLevel: i64 = 2147483647;         // Maximum possible level
+
+// Use this for appearing above SEB/kiosk apps - MAXIMUM level
+const WINDOW_LEVEL: i64 = kCGMaximumWindowLevel;
 const NSWindowSharingNone: u64 = 0;
 const NSBezelStyleRounded: u64 = 1;
 const NSEventTypeKeyDown: u64 = 10;
@@ -51,6 +60,36 @@ static REGISTER_DRAGGABLE_VIEW: Once = Once::new();
 static REGISTER_FOCUSLESS_TEXT_FIELD: Once = Once::new();
 static REGISTER_NON_ACTIVATING_PANEL: Once = Once::new();
 static REGISTER_SPACE_CHANGE_HANDLER: Once = Once::new();
+static REGISTER_FOCUSLESS_BUTTON: Once = Once::new();
+
+// ---------------- LOGGING ----------------
+
+fn log_to_file(message: &str) {
+    // Get home directory and create log path
+    if let Ok(home) = std::env::var("HOME") {
+        let log_path = format!("{}/Desktop/ghostmac_log.txt", home);
+        
+        // Get timestamp
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        
+        let log_line = format!("[{}] {}\n", timestamp, message);
+        
+        // Append to file
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let _ = file.write_all(log_line.as_bytes());
+        }
+    }
+    
+    // Also print to console
+    println!("{}", message);
+}
 
 // ---------------- BUTTON HANDLERS ----------------
 
@@ -62,19 +101,30 @@ extern "C" fn close_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
 }
 
 extern "C" fn test_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
-    println!("Test button clicked!");
+    log_to_file("Test button clicked!");
 }
 
 // ---------------- SPACE/DESKTOP CHANGE HANDLER ----------------
 
 extern "C" fn space_did_change(_this: &Object, _cmd: Sel, _notification: id) {
     let count = DESKTOP_CHANGE_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
-    println!("Desktop/Space changed! Count: {}", count);
+    log_to_file(&format!("Desktop/Space changed! Count: {}", count));
+    
+    // Reassert window visibility on space change
+    unsafe {
+        let window = WINDOW.load(Ordering::SeqCst);
+        if !window.is_null() {
+            // Reassert level and bring to front
+            let _: () = msg_send![window, setLevel: WINDOW_LEVEL];
+            let _: () = msg_send![window, orderFrontRegardless];
+            log_to_file("Window level reasserted and brought to front");
+        }
+    }
     
     thread::spawn(move || {
-        println!("[Thread {}] Handling desktop change...", count);
+        log_to_file(&format!("[Thread {}] Handling desktop change...", count));
         std::thread::sleep(std::time::Duration::from_millis(100));
-        println!("[Thread {}] Desktop change handled.", count);
+        log_to_file(&format!("[Thread {}] Desktop change handled.", count));
     });
 }
 
@@ -88,12 +138,26 @@ extern "C" fn panel_can_become_main_window(_this: &Object, _cmd: Sel) -> BOOL {
     NO // Never become main window
 }
 
+// ---------------- FOCUSLESS BUTTON ----------------
+
+extern "C" fn button_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> BOOL {
+    YES // Accept click without requiring window activation first
+}
+
+extern "C" fn button_accepts_first_responder(_this: &Object, _cmd: Sel) -> BOOL {
+    NO // Never become first responder
+}
+
+extern "C" fn button_needs_panel_to_become_key(_this: &Object, _cmd: Sel) -> BOOL {
+    NO // Don't need panel to become key window
+}
+
 // ---------------- DRAGGABLE BACKGROUND ----------------
 
 extern "C" fn mouse_down(this: &Object, _cmd: Sel, event: id) {
     unsafe {
         TEXT_FIELD_ACTIVE.store(false, Ordering::SeqCst);
-        println!("Text field DEACTIVATED");
+        log_to_file("Text field DEACTIVATED");
 
         let tf = TEXT_FIELD.load(Ordering::SeqCst);
         if !tf.is_null() {
@@ -122,7 +186,7 @@ extern "C" fn text_field_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: 
 
 extern "C" fn text_field_mouse_down(_this: &Object, _cmd: Sel, _event: id) {
     TEXT_FIELD_ACTIVE.store(true, Ordering::SeqCst);
-    println!("Text field ACTIVATED");
+    log_to_file("Text field ACTIVATED");
 
     unsafe {
         let tf = TEXT_FIELD.load(Ordering::SeqCst);
@@ -247,6 +311,29 @@ fn register_space_change_handler_class() {
     });
 }
 
+fn register_focusless_button_class() {
+    REGISTER_FOCUSLESS_BUTTON.call_once(|| {
+        let superclass = Class::get("NSButton").unwrap();
+        let mut decl = ClassDecl::new("FocuslessButton", superclass).unwrap();
+
+        unsafe {
+            decl.add_method(
+                sel!(acceptsFirstMouse:),
+                button_accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> BOOL,
+            );
+            decl.add_method(
+                sel!(acceptsFirstResponder),
+                button_accepts_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+            decl.add_method(
+                sel!(needsPanelToBecomeKey),
+                button_needs_panel_to_become_key as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+        }
+        decl.register();
+    });
+}
+
 // ---------------- KEY FILTER ----------------
 
 fn should_pass_through_key(key_code: u16, modifier_flags: u64) -> bool {
@@ -282,6 +369,7 @@ fn main() {
         register_draggable_view_class();
         register_focusless_text_field_class();
         register_space_change_handler_class();
+        register_focusless_button_class();
 
         // Set up Desktop/Space change notification observer
         let space_handler_class = Class::get("SpaceChangeHandler").unwrap();
@@ -297,7 +385,7 @@ fn main() {
             name:notification_name 
             object:nil
         ];
-        println!("Desktop/Space change observer registered.");
+        log_to_file("Desktop/Space change observer registered.");
 
         let app = NSApp();
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory);
@@ -326,7 +414,7 @@ fn main() {
         let _: () = msg_send![window, setBackgroundColor: black_color];
         let _: () = msg_send![window, setOpaque: YES];
         let _: () = msg_send![window, setHasShadow: NO];
-        let _: () = msg_send![window, setLevel: kCGFloatingWindowLevel];
+        let _: () = msg_send![window, setLevel: WINDOW_LEVEL]; // High level to appear above SEB
         let _: () = msg_send![window, setSharingType: NSWindowSharingNone];
         
         // Critical panel settings for non-activation
@@ -340,6 +428,9 @@ fn main() {
 
         let _: () = msg_send![window, setCollectionBehavior: behavior];
         let _: () = msg_send![window, setMovableByWindowBackground: YES];
+        
+        // Store window reference for desktop change handler
+        WINDOW.store(window as *mut Object, Ordering::SeqCst);
 
         // Create draggable content view
         let draggable_class = Class::get("DraggableView").unwrap();
@@ -352,8 +443,8 @@ fn main() {
         let handler_class = Class::get("ButtonHandler").unwrap();
         let handler: id = msg_send![handler_class, new];
 
-        // Use regular NSButton
-        let button_class = Class::get("NSButton").unwrap();
+        // Use FocuslessButton instead of regular NSButton
+        let button_class = Class::get("FocuslessButton").unwrap();
 
         // Close button
         let close_button: id = msg_send![button_class, alloc];
@@ -432,7 +523,7 @@ fn main() {
                     } else if key_code == kVK_Return {
                         let empty = NSString::alloc(nil).init_str("");
                         let _: () = msg_send![tf, setStringValue: empty];
-                        println!("Submitted!");
+                        log_to_file("Submitted!");
                         return nil;
                     } else {
                         let _: () = msg_send![mutable_string, appendString: characters];
@@ -495,7 +586,7 @@ fn main() {
         let _: () = msg_send![window, center];
         let _: () = msg_send![window, orderFrontRegardless];
 
-        println!("App started - NonActivatingPanel with canBecomeKeyWindow=NO");
+        log_to_file("App started - NonActivatingPanel with kCGMaximumWindowLevel");
 
         app.run();
     }
