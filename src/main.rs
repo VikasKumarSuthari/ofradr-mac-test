@@ -8,7 +8,7 @@ use objc::runtime::Class;
 use cocoa::base::nil;
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize};
 
-// Window level constants - using very high level to stay above ALL windows
+#[allow(non_upper_case_globals)]
 const kCGFloatingWindowLevel: i64 = 2147483631;
 
 fn main() {
