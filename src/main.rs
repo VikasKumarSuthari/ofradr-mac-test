@@ -25,6 +25,7 @@ const NSWindowSharingNone: u64 = 0;
 const NSBezelStyleRounded: u64 = 1;
 
 static REGISTER_BUTTON_HANDLER: Once = Once::new();
+static REGISTER_DRAGGABLE_VIEW: Once = Once::new();
 
 // Button action handler for close button
 extern "C" fn close_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
@@ -37,6 +38,18 @@ extern "C" fn close_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
 // Button action handler for center test button
 extern "C" fn test_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
     println!("Test button clicked!");
+}
+
+// DraggableView mouse event handlers
+extern "C" fn mouse_down(this: &Object, _cmd: Sel, event: id) {
+    unsafe {
+        let window: id = msg_send![this, window];
+        let _: () = msg_send![window, performWindowDragWithEvent: event];
+    }
+}
+
+extern "C" fn accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> bool {
+    true // Accept first mouse click without activating
 }
 
 fn register_button_handler_class() {
@@ -59,12 +72,33 @@ fn register_button_handler_class() {
     });
 }
 
+fn register_draggable_view_class() {
+    REGISTER_DRAGGABLE_VIEW.call_once(|| {
+        let superclass = Class::get("NSView").unwrap();
+        let mut decl = ClassDecl::new("DraggableView", superclass).unwrap();
+        
+        unsafe {
+            decl.add_method(
+                sel!(mouseDown:),
+                mouse_down as extern "C" fn(&Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(acceptsFirstMouse:),
+                accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> bool,
+            );
+        }
+        
+        decl.register();
+    });
+}
+
 fn main() {
     unsafe {
         let _pool = NSAutoreleasePool::new(nil);
 
-        // Register our button handler class
+        // Register our custom classes
         register_button_handler_class();
+        register_draggable_view_class();
 
         let app = NSApp();
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory);
@@ -103,9 +137,16 @@ fn main() {
             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary;
         let _: () = msg_send![window, setCollectionBehavior: behavior];
+        
+        // Enable window to be movable by dragging background
+        let _: () = msg_send![window, setMovableByWindowBackground: YES];
 
-        // Get content view
-        let content_view: id = msg_send![window, contentView];
+        // Create a draggable view as the content view
+        let draggable_class = Class::get("DraggableView").unwrap();
+        let content_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
+        let draggable_view: id = msg_send![draggable_class, alloc];
+        let draggable_view: id = msg_send![draggable_view, initWithFrame: content_frame];
+        let _: () = msg_send![window, setContentView: draggable_view];
 
         // Create button handler instance
         let handler_class = Class::get("ButtonHandler").unwrap();
@@ -121,7 +162,7 @@ fn main() {
         let _: () = msg_send![close_button, setBezelStyle: NSBezelStyleRounded];
         let _: () = msg_send![close_button, setTarget: handler];
         let _: () = msg_send![close_button, setAction: sel!(closeButtonClicked:)];
-        let _: () = msg_send![content_view, addSubview: close_button];
+        let _: () = msg_send![draggable_view, addSubview: close_button];
 
         // Create Test button (center)
         let test_button: id = msg_send![button_class, alloc];
@@ -132,7 +173,7 @@ fn main() {
         let _: () = msg_send![test_button, setBezelStyle: NSBezelStyleRounded];
         let _: () = msg_send![test_button, setTarget: handler];
         let _: () = msg_send![test_button, setAction: sel!(testButtonClicked:)];
-        let _: () = msg_send![content_view, addSubview: test_button];
+        let _: () = msg_send![draggable_view, addSubview: test_button];
 
         let _: () = msg_send![window, center];
         let _: () = msg_send![window, orderFrontRegardless];
