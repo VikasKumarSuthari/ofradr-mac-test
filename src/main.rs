@@ -301,7 +301,7 @@ fn main() {
         // Easier: Create a specific Observer Class like `SpaceObserver`.
         
         register_space_observer_class();
-        let observer = msg_send![class!(SpaceObserver), new];
+        let observer: id = msg_send![class!(SpaceObserver), new];
         let name = NSString::alloc(nil).init_str("NSWorkspaceActiveSpaceDidChangeNotification");
         let _: () = msg_send![notification_center, addObserver:observer selector:sel!(spaceChanged:) name:name object:workspace];
 
