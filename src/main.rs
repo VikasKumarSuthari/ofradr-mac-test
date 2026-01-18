@@ -14,13 +14,17 @@ use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
 use std::sync::Once;
 use std::sync::atomic::{AtomicPtr, AtomicBool, Ordering};
 
-// Store the text field globally so event handler can access it
+// Store the text field and window globally so event handler can access it
 static TEXT_FIELD: AtomicPtr<Object> = AtomicPtr::new(std::ptr::null_mut());
+static WINDOW: AtomicPtr<Object> = AtomicPtr::new(std::ptr::null_mut());
 // Track if our text field is "active" (receiving input)
-static TEXT_FIELD_ACTIVE: AtomicBool = AtomicBool::new(true);
+static TEXT_FIELD_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+// Use a very high floating window level - screen saver level + 1
 #[allow(non_upper_case_globals)]
-const kCGFloatingWindowLevel: i64 = 2147483631;
+const kCGScreenSaverWindowLevel: i64 = 2147483629;
+#[allow(non_upper_case_globals)]
+const kCGMaximumWindowLevel: i64 = kCGScreenSaverWindowLevel + 100;
 
 // NSWindowSharingType values
 #[allow(non_upper_case_globals)]
@@ -63,6 +67,7 @@ const kVK_Delete: u16 = 0x33;
 static REGISTER_BUTTON_HANDLER: Once = Once::new();
 static REGISTER_DRAGGABLE_VIEW: Once = Once::new();
 static REGISTER_FOCUSLESS_TEXT_FIELD: Once = Once::new();
+static REGISTER_CLICKABLE_TEXT_VIEW: Once = Once::new();
 
 // Button action handler for close button
 extern "C" fn close_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
@@ -75,11 +80,23 @@ extern "C" fn close_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
 // Button action handler for center test button
 extern "C" fn test_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
     println!("Test button clicked!");
+    // Force window to front when test button is clicked
+    let window = WINDOW.load(Ordering::SeqCst);
+    if !window.is_null() {
+        unsafe {
+            let _: () = msg_send![window, setLevel: kCGMaximumWindowLevel];
+            let _: () = msg_send![window, orderFrontRegardless];
+        }
+    }
 }
 
 // DraggableView mouse event handlers
 extern "C" fn mouse_down(this: &Object, _cmd: Sel, event: id) {
     unsafe {
+        // Deactivate text field when clicking outside it
+        TEXT_FIELD_ACTIVE.store(false, Ordering::SeqCst);
+        update_text_field_visual(false);
+        
         let window: id = msg_send![this, window];
         let _: () = msg_send![window, performWindowDragWithEvent: event];
     }
@@ -89,6 +106,45 @@ extern "C" fn accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> bool
     true // Accept first mouse click without activating
 }
 
+// Update text field visual based on active state
+fn update_text_field_visual(active: bool) {
+    let tf = TEXT_FIELD.load(Ordering::SeqCst);
+    if tf.is_null() {
+        return;
+    }
+    
+    unsafe {
+        let ns_color_class = Class::get("NSColor").unwrap();
+        if active {
+            // Active state: light blue background with blue border
+            let active_bg: id = msg_send![ns_color_class, colorWithRed:0.9 green:0.95 blue:1.0 alpha:1.0];
+            let _: () = msg_send![tf, setBackgroundColor: active_bg];
+            // Add a focus ring effect
+            let _: () = msg_send![tf, setFocusRingType: 1_u64]; // NSFocusRingTypeExterior
+        } else {
+            // Inactive state: white background
+            let white_color: id = msg_send![ns_color_class, whiteColor];
+            let _: () = msg_send![tf, setBackgroundColor: white_color];
+            let _: () = msg_send![tf, setFocusRingType: 0_u64]; // NSFocusRingTypeNone
+        }
+        let _: () = msg_send![tf, setNeedsDisplay: YES];
+    }
+}
+
+// ClickableTextView - a view that sits on top of text field to capture clicks
+extern "C" fn clickable_view_mouse_down(_this: &Object, _cmd: Sel, _event: id) {
+    // Activate text field input
+    let was_active = TEXT_FIELD_ACTIVE.swap(true, Ordering::SeqCst);
+    if !was_active {
+        println!("Text field ACTIVATED - typing will appear here");
+        update_text_field_visual(true);
+    }
+}
+
+extern "C" fn clickable_view_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> bool {
+    true
+}
+
 // FocuslessTextField - accepts clicks without activating window
 extern "C" fn text_field_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> bool {
     true
@@ -96,8 +152,11 @@ extern "C" fn text_field_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: 
 
 extern "C" fn text_field_mouse_down(_this: &Object, _cmd: Sel, _event: id) {
     // Activate our text input without stealing focus
-    TEXT_FIELD_ACTIVE.store(true, Ordering::SeqCst);
-    println!("Text field activated - typing will appear here");
+    let was_active = TEXT_FIELD_ACTIVE.swap(true, Ordering::SeqCst);
+    if !was_active {
+        println!("Text field ACTIVATED - typing will appear here");
+        update_text_field_visual(true);
+    }
 }
 
 extern "C" fn text_field_accepts_first_responder(_this: &Object, _cmd: Sel) -> bool {
@@ -176,6 +235,26 @@ fn register_focusless_text_field_class() {
     });
 }
 
+fn register_clickable_text_view_class() {
+    REGISTER_CLICKABLE_TEXT_VIEW.call_once(|| {
+        let superclass = Class::get("NSView").unwrap();
+        let mut decl = ClassDecl::new("ClickableTextView", superclass).unwrap();
+        
+        unsafe {
+            decl.add_method(
+                sel!(mouseDown:),
+                clickable_view_mouse_down as extern "C" fn(&Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(acceptsFirstMouse:),
+                clickable_view_accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> bool,
+            );
+        }
+        
+        decl.register();
+    });
+}
+
 fn should_pass_through_key(key_code: u16, modifier_flags: u64) -> bool {
     // Let arrow keys, escape, tab pass through
     if key_code == kVK_UpArrow || key_code == kVK_DownArrow || 
@@ -202,6 +281,7 @@ fn main() {
         register_button_handler_class();
         register_draggable_view_class();
         register_focusless_text_field_class();
+        register_clickable_text_view_class();
 
         let app = NSApp();
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory);
@@ -221,12 +301,17 @@ fn main() {
             defer:NO
         ];
 
+        // Store window reference globally
+        WINDOW.store(window as *mut Object, Ordering::SeqCst);
+
         let ns_color_class = Class::get("NSColor").unwrap();
         let black_color: id = msg_send![ns_color_class, blackColor];
         let _: () = msg_send![window, setBackgroundColor: black_color];
         let _: () = msg_send![window, setOpaque: YES];
         let _: () = msg_send![window, setHasShadow: NO];
-        let _: () = msg_send![window, setLevel: kCGFloatingWindowLevel];
+        
+        // Use maximum window level for always on top
+        let _: () = msg_send![window, setLevel: kCGMaximumWindowLevel];
         
         // Make window invisible in screen recording and screen sharing
         let _: () = msg_send![window, setSharingType: NSWindowSharingNone];
@@ -235,10 +320,14 @@ fn main() {
         let _: () = msg_send![window, setFloatingPanel: YES];
         let _: () = msg_send![window, setBecomesKeyOnlyIfNeeded: YES];
         
-        // Set collection behavior to appear on all spaces
+        // CRITICAL: Hide from app switcher and keep on top
+        let _: () = msg_send![window, setHidesOnDeactivate: NO];
+        
+        // Set collection behavior to appear on all spaces and stay on top
         let behavior = NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
-            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary;
+            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
+            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle;
         let _: () = msg_send![window, setCollectionBehavior: behavior];
         
         // Enable window to be movable by dragging background
@@ -285,7 +374,7 @@ fn main() {
         let text_field: id = msg_send![text_field, initWithFrame: text_field_frame];
         
         // Style the text field
-        let placeholder = NSString::alloc(nil).init_str("Type here...");
+        let placeholder = NSString::alloc(nil).init_str("Click to activate, then type...");
         let _: () = msg_send![text_field, setPlaceholderString: placeholder];
         let _: () = msg_send![text_field, setBezeled: YES];
         let _: () = msg_send![text_field, setDrawsBackground: YES];
@@ -299,12 +388,74 @@ fn main() {
         // Store text field reference for event handler
         TEXT_FIELD.store(text_field as *mut Object, Ordering::SeqCst);
 
+        // Create a clickable overlay view on top of the text field
+        let clickable_class = Class::get("ClickableTextView").unwrap();
+        let clickable_view: id = msg_send![clickable_class, alloc];
+        let clickable_view: id = msg_send![clickable_view, initWithFrame: text_field_frame];
+        let _: () = msg_send![draggable_view, addSubview: clickable_view];
+
         // Set up global event monitor for key events
         let ns_event_class = Class::get("NSEvent").unwrap();
         let mask: u64 = 1 << NSEventTypeKeyDown; // NSEventMaskKeyDown
         
-        // Create the event handler block
+        // Create the event handler block for global monitor
         let block = block::ConcreteBlock::new(move |event: id| -> id {
+            // Only capture keys if our text field is active
+            if !TEXT_FIELD_ACTIVE.load(Ordering::SeqCst) {
+                return event; // Pass through
+            }
+            
+            let key_code: u16 = msg_send![event, keyCode];
+            let modifier_flags: u64 = msg_send![event, modifierFlags];
+            
+            // Check if we should pass this key through
+            if should_pass_through_key(key_code, modifier_flags) {
+                return event; // Let it pass through
+            }
+            
+            // Get the text field and append the character
+            let tf = TEXT_FIELD.load(Ordering::SeqCst);
+            if !tf.is_null() {
+                let characters: id = msg_send![event, characters];
+                if characters != nil {
+                    let current_text: id = msg_send![tf, stringValue];
+                    let mutable_string: id = msg_send![class!(NSMutableString), alloc];
+                    let mutable_string: id = msg_send![mutable_string, initWithString: current_text];
+                    
+                    // Handle backspace
+                    if key_code == kVK_Delete {
+                        let length: usize = msg_send![mutable_string, length];
+                        if length > 0 {
+                            let range = cocoa::foundation::NSRange::new((length - 1) as u64, 1);
+                            let _: () = msg_send![mutable_string, deleteCharactersInRange: range];
+                        }
+                    } else if key_code == kVK_Return {
+                        // Submit and show what was typed
+                        let text_len: usize = msg_send![mutable_string, length];
+                        if text_len > 0 {
+                            println!("Submitted: {:?}", mutable_string);
+                        }
+                        // Clear on Enter
+                        let empty = NSString::alloc(nil).init_str("");
+                        let _: () = msg_send![tf, setStringValue: empty];
+                        return nil; // Swallow the event
+                    } else {
+                        let _: () = msg_send![mutable_string, appendString: characters];
+                    }
+                    
+                    let _: () = msg_send![tf, setStringValue: mutable_string];
+                }
+            }
+            
+            nil // Return nil to swallow the event (prevents it from reaching other apps)
+        });
+        let block = block.copy();
+        
+        // Add global monitor for key events
+        let _monitor: id = msg_send![ns_event_class, addGlobalMonitorForEventsMatchingMask:mask handler:&*block];
+
+        // Add a local monitor as well for when our app is in focus
+        let local_block = block::ConcreteBlock::new(move |event: id| -> id {
             // Only capture keys if our text field is active
             if !TEXT_FIELD_ACTIVE.load(Ordering::SeqCst) {
                 return event; // Pass through
@@ -347,11 +498,27 @@ fn main() {
                 }
             }
             
-            nil // Return nil to swallow the event (prevents it from reaching other apps)
+            nil // Return nil to swallow the event
         });
-        let block = block.copy();
+        let local_block = local_block.copy();
+        let _local_monitor: id = msg_send![ns_event_class, addLocalMonitorForEventsMatchingMask:mask handler:&*local_block];
+
+        // Set up a timer to periodically reassert the window level (every 0.5 seconds)
+        let timer_block = block::ConcreteBlock::new(move |_timer: id| {
+            let window_ptr = WINDOW.load(Ordering::SeqCst);
+            if !window_ptr.is_null() {
+                let _: () = msg_send![window_ptr, setLevel: kCGMaximumWindowLevel];
+                let _: () = msg_send![window_ptr, orderFrontRegardless];
+            }
+        });
+        let timer_block = timer_block.copy();
         
-        let _monitor: id = msg_send![ns_event_class, addGlobalMonitorForEventsMatchingMask:mask handler:&*block];
+        let timer_class = Class::get("NSTimer").unwrap();
+        let _timer: id = msg_send![timer_class, 
+            scheduledTimerWithTimeInterval:0.5_f64 
+            repeats:YES 
+            block:&*timer_block
+        ];
 
         let _: () = msg_send![window, center];
         let _: () = msg_send![window, orderFrontRegardless];
