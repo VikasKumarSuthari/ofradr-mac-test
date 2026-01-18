@@ -11,6 +11,10 @@ use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize};
 #[allow(non_upper_case_globals)]
 const kCGFloatingWindowLevel: i64 = 2147483631;
 
+// NSWindowSharingType values
+#[allow(non_upper_case_globals)]
+const NSWindowSharingNone: u64 = 0; // Window is not visible in screen capture
+
 fn main() {
     unsafe {
         let _pool = NSAutoreleasePool::new(nil);
@@ -36,6 +40,9 @@ fn main() {
         window.setOpaque_(true);
         window.setHasShadow_(false);
         window.setLevel_(kCGFloatingWindowLevel);
+        
+        // Make window invisible in screen recording and screen sharing
+        let _: () = msg_send![window, setSharingType: NSWindowSharingNone];
         
         // Set collection behavior to appear on all spaces
         let behavior = NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
