@@ -403,15 +403,21 @@ fn main() {
                         unsafe {
                             // 2. DYNAMIC LEVEL ESCALATION
                             // Your logs showed SEB is at Layer 30. We set to Layer + 1.
-                            // CRITICAL FIX 2: Prevent Overflow!
-                            // If top_window_layer is MaxInt (2147483647), adding 1 wraps to negative (Bottom!).
-                            // SEB Full Screen likely uses MaxInt (Shielding).
-                            let mut target_level = 0;
-                            if top_window_layer >= 2147483647 {
-                                target_level = 2147483647; // Cap at Max
-                            } else {
-                                target_level = top_window_layer + 1;
+                            // CRITICAL FIX 3: Don't fly too close to the sun!
+                            // Window Server is at 2147483630 (Cursor Level).
+                            // If we go to 2147483631, we might be suppressed/invisible.
+                            // Strategy: If layer is HUGE, MATCH it, don't exceed it.
+                            // Rely on standard CGSOrderWindow to put us on top of the pile *within* that level.
+                            
+                            let mut target_level = top_window_layer + 1;
+                            
+                            // If top is Cursor level or higher (MaxInt-ish), clamp to it.
+                            if top_window_layer >= 2147483630 {
+                                target_level = top_window_layer;
                             }
+                            
+                            // Prevent actual overflow check just in case
+                            if target_level < 0 { target_level = 2147483647; }
                             
                             // CRITICAL FIX 1: Ensure we never drop below 2002 (ScreenSaver)
                             if target_level < 2002 {
