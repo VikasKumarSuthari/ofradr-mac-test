@@ -422,6 +422,28 @@ fn main() {
         let _: () = msg_send![window, orderFrontRegardless];
 
         log_to_file("App started with window visible");
+        
+        // Aggressive heartbeat - reassert window every 500ms to fight SEB
+        thread::spawn(|| {
+            let mut count: u64 = 0;
+            loop {
+                count += 1;
+                unsafe {
+                    let window = WINDOW.load(Ordering::SeqCst);
+                    if !window.is_null() {
+                        // Constantly reassert level
+                        let _: () = msg_send![window, setLevel: WINDOW_LEVEL];
+                        let _: () = msg_send![window, orderFrontRegardless];
+                    }
+                }
+                // Log every 10th heartbeat to avoid spam
+                if count % 10 == 0 {
+                    log_to_file(&format!("Heartbeat #{}: Window level reasserted", count));
+                }
+                thread::sleep(std::time::Duration::from_millis(500));
+            }
+        });
+        log_to_file("Heartbeat thread started (every 500ms)");
 
         app.run();
     }
