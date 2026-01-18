@@ -11,7 +11,7 @@ use cocoa::appkit::{
 };
 use cocoa::base::{nil, id, YES, NO};
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
-use objc::runtime::{Class, Object, Sel, BOOL};
+use objc::runtime::{Class, Object, Sel};
 use objc::declare::ClassDecl;
 use std::sync::Once;
 use std::sync::atomic::{AtomicPtr, AtomicBool, AtomicU64, Ordering};
@@ -26,29 +26,13 @@ static WINDOW: AtomicPtr<Object> = AtomicPtr::new(std::ptr::null_mut());
 static TEXT_FIELD_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DESKTOP_CHANGE_COUNT: AtomicU64 = AtomicU64::new(0);
 
-// Window levels - higher = more on top
-const kCGFloatingWindowLevel: i64 = 2147483631;       // Normal floating
-const kCGScreenSaverWindowLevel: i64 = 2147483647 - 1; // Very high - above most apps
-const kCGMaximumWindowLevel: i64 = 2147483647;         // Maximum possible level
+// Window levels - SEB uses NSScreenSaverWindowLevel+1, we use +2 to be above
+const kCGFloatingWindowLevel: i64 = 2147483631;
+const kCGScreenSaverWindowLevel: i64 = 2147483647 - 1;
+const WINDOW_LEVEL: i64 = kCGScreenSaverWindowLevel + 2;  // Above SEB!
 
-// CGWindowLevelKey values for CGWindowLevelForKey
-const kCGAssistiveTechHighWindowLevelKey: i32 = 20;
-const kCGCursorWindowLevelKey: i32 = 19;
-const kCGDraggingWindowLevelKey: i32 = 12;
-
-// External CoreGraphics functions
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGWindowLevelForKey(key: i32) -> i64;
-    fn CGSMainConnectionID() -> u32;
-    fn CGSSetWindowLevel(connection: u32, window_id: u32, level: i64) -> i32;
-}
-
-// Use this for appearing above SEB/kiosk apps - USE MAXIMUM LEVEL (assistive tech level was only 1500!)
-static USE_ASSISTIVE_LEVEL: bool = false;  // false = use kCGMaximumWindowLevel (2147483647)
 const NSWindowSharingNone: u64 = 0;
 const NSBezelStyleRounded: u64 = 1;
-const NSEventTypeKeyDown: u64 = 10;
 
 const kVK_UpArrow: u16 = 0x7E;
 const kVK_DownArrow: u16 = 0x7D;
@@ -62,166 +46,28 @@ const kVK_Delete: u16 = 0x33;
 const NSEventModifierFlagCommand: u64 = 1 << 20;
 const NSEventModifierFlagOption: u64 = 1 << 19;
 const NSEventModifierFlagControl: u64 = 1 << 18;
-
-const NSFocusRingTypeNone: u64 = 1;
-
-// NSWindowStyleMask values - NSNonactivatingPanelMask is the KEY!
-const NSNonactivatingPanelMask: u64 = 1 << 7; // 128 - prevents activation when clicking
+const NSEventTypeKeyDown: u64 = 10;
 
 static REGISTER_BUTTON_HANDLER: Once = Once::new();
 static REGISTER_DRAGGABLE_VIEW: Once = Once::new();
 static REGISTER_FOCUSLESS_TEXT_FIELD: Once = Once::new();
-static REGISTER_NON_ACTIVATING_PANEL: Once = Once::new();
 static REGISTER_SPACE_CHANGE_HANDLER: Once = Once::new();
-static REGISTER_FOCUSLESS_BUTTON: Once = Once::new();
 
-// ---------------- LOGGING & DETECTION ----------------
+// ---------------- LOGGING ----------------
 
 fn log_to_file(message: &str) {
-    // Get home directory and create log path
     if let Ok(home) = std::env::var("HOME") {
         let log_path = format!("{}/Desktop/ghostmac_log.txt", home);
-        
-        // Get timestamp
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        
         let log_line = format!("[{}] {}\n", timestamp, message);
-        
-        // Append to file
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
             let _ = file.write_all(log_line.as_bytes());
         }
     }
-    
-    // Also print to console
     println!("{}", message);
-}
-
-// Get current space/desktop information
-fn get_current_space_info() -> (String, String) {
-    unsafe {
-        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
-        
-        // Get active space UUID (might be random string in SEB)
-        let active_space: id = msg_send![workspace, activeSpace];
-        
-        let space_uuid: String = if active_space != nil {
-            let uuid: id = msg_send![active_space, uuid];
-            if uuid != nil {
-                let c_str: *const i8 = msg_send![uuid, UTF8String];
-                if !c_str.is_null() {
-                    std::ffi::CStr::from_ptr(c_str).to_string_lossy().to_string()
-                } else {
-                    "unknown-uuid".to_string()
-                }
-            } else {
-                "no-uuid".to_string()
-            }
-        } else {
-            "no-active-space".to_string()
-        };
-        
-        // Get localized name if available
-        let space_name: String = if active_space != nil {
-            let name: id = msg_send![active_space, localizedName];
-            if name != nil {
-                let c_str: *const i8 = msg_send![name, UTF8String];
-                if !c_str.is_null() {
-                    std::ffi::CStr::from_ptr(c_str).to_string_lossy().to_string()
-                } else {
-                    "unnamed".to_string()
-                }
-            } else {
-                "no-name".to_string()
-            }
-        } else {
-            "unknown".to_string()
-        };
-        
-        (space_uuid, space_name)
-    }
-}
-
-// Check if SEB (Safe Exam Browser) is running
-fn is_seb_running() -> bool {
-    unsafe {
-        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
-        let running_apps: id = msg_send![workspace, runningApplications];
-        let count: usize = msg_send![running_apps, count];
-        
-        for i in 0..count {
-            let app: id = msg_send![running_apps, objectAtIndex: i];
-            let bundle_id: id = msg_send![app, bundleIdentifier];
-            if bundle_id != nil {
-                let c_str: *const i8 = msg_send![bundle_id, UTF8String];
-                if !c_str.is_null() {
-                    let bundle_str = std::ffi::CStr::from_ptr(c_str).to_string_lossy();
-                    if bundle_str.contains("org.safeexambrowser") || bundle_str.contains("SafeExamBrowser") {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-}
-
-// Get frontmost application info
-fn get_frontmost_app() -> (String, String) {
-    unsafe {
-        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
-        let frontmost: id = msg_send![workspace, frontmostApplication];
-        
-        if frontmost == nil {
-            return ("unknown".to_string(), "unknown".to_string());
-        }
-        
-        let app_name: id = msg_send![frontmost, localizedName];
-        let bundle_id: id = msg_send![frontmost, bundleIdentifier];
-        
-        let name = if app_name != nil {
-            let c_str: *const i8 = msg_send![app_name, UTF8String];
-            if !c_str.is_null() {
-                std::ffi::CStr::from_ptr(c_str).to_string_lossy().to_string()
-            } else {
-                "unknown".to_string()
-            }
-        } else {
-            "unknown".to_string()
-        };
-        
-        let bundle = if bundle_id != nil {
-            let c_str: *const i8 = msg_send![bundle_id, UTF8String];
-            if !c_str.is_null() {
-                std::ffi::CStr::from_ptr(c_str).to_string_lossy().to_string()
-            } else {
-                "unknown".to_string()
-            }
-        } else {
-            "unknown".to_string()
-        };
-        
-        (name, bundle)
-    }
-}
-
-// Log comprehensive system state
-fn log_system_state(event: &str) {
-    let (space_uuid, space_name) = get_current_space_info();
-    let (app_name, app_bundle) = get_frontmost_app();
-    let seb_running = is_seb_running();
-    
-    log_to_file(&format!(
-        "=== {} ===\n  Space UUID: {}\n  Space Name: {}\n  Frontmost App: {} ({})\n  SEB Running: {}",
-        event, space_uuid, space_name, app_name, app_bundle, seb_running
-    ));
 }
 
 // ---------------- BUTTON HANDLERS ----------------
@@ -237,57 +83,20 @@ extern "C" fn test_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
     log_to_file("Test button clicked!");
 }
 
-// ---------------- SPACE/DESKTOP CHANGE HANDLER ----------------
+// ---------------- SPACE CHANGE HANDLER ----------------
 
 extern "C" fn space_did_change(_this: &Object, _cmd: Sel, _notification: id) {
     let count = DESKTOP_CHANGE_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+    log_to_file(&format!("Desktop/Space changed! Count: {}", count));
     
-    // Log comprehensive state
-    log_system_state(&format!("DESKTOP CHANGE #{}", count));
-    
-    // Reassert window visibility on space change
     unsafe {
         let window = WINDOW.load(Ordering::SeqCst);
         if !window.is_null() {
-            // Use SEB's technique: NSScreenSaverWindowLevel + 2
-            let window_level = kCGScreenSaverWindowLevel + 2;
-            
-            // Reassert level and bring to front
-            let _: () = msg_send![window, setLevel: window_level];
+            let _: () = msg_send![window, setLevel: WINDOW_LEVEL];
             let _: () = msg_send![window, orderFrontRegardless];
-            
-            log_to_file(&format!("  Window level reasserted to {}", window_level));
+            log_to_file(&format!("Window level reasserted to {}", WINDOW_LEVEL));
         }
     }
-    
-    thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        log_to_file(&format!("[Thread {}] Desktop change processed", count));
-    });
-}
-
-// ---------------- NON-ACTIVATING PANEL ----------------
-
-extern "C" fn panel_can_become_key_window(_this: &Object, _cmd: Sel) -> BOOL {
-    NO // Never become key window - prevents focus stealing
-}
-
-extern "C" fn panel_can_become_main_window(_this: &Object, _cmd: Sel) -> BOOL {
-    NO // Never become main window
-}
-
-// ---------------- FOCUSLESS BUTTON ----------------
-
-extern "C" fn button_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> BOOL {
-    YES // Accept click without requiring window activation first
-}
-
-extern "C" fn button_accepts_first_responder(_this: &Object, _cmd: Sel) -> BOOL {
-    NO // Never become first responder
-}
-
-extern "C" fn button_needs_panel_to_become_key(_this: &Object, _cmd: Sel) -> BOOL {
-    NO // Don't need panel to become key window
 }
 
 // ---------------- DRAGGABLE BACKGROUND ----------------
@@ -308,18 +117,14 @@ extern "C" fn mouse_down(this: &Object, _cmd: Sel, event: id) {
     }
 }
 
-extern "C" fn accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> BOOL {
-    YES
-}
-
-extern "C" fn view_accepts_first_responder(_this: &Object, _cmd: Sel) -> BOOL {
-    NO
+extern "C" fn accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> bool {
+    true
 }
 
 // ---------------- FOCUSLESS TEXT FIELD ----------------
 
-extern "C" fn text_field_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> BOOL {
-    YES
+extern "C" fn text_field_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> bool {
+    true
 }
 
 extern "C" fn text_field_mouse_down(_this: &Object, _cmd: Sel, _event: id) {
@@ -329,41 +134,21 @@ extern "C" fn text_field_mouse_down(_this: &Object, _cmd: Sel, _event: id) {
     unsafe {
         let tf = TEXT_FIELD.load(Ordering::SeqCst);
         if !tf.is_null() {
-            let active_color: id = msg_send![class!(NSColor), colorWithRed:0.9_f64 green:0.95_f64 blue:1.0_f64 alpha:1.0_f64];
-            let _: () = msg_send![tf, setBackgroundColor: active_color];
+            let gray: id = msg_send![class!(NSColor), lightGrayColor];
+            let _: () = msg_send![tf, setBackgroundColor: gray];
         }
     }
 }
 
-extern "C" fn text_field_accepts_first_responder(_this: &Object, _cmd: Sel) -> BOOL {
-    NO
+extern "C" fn text_field_accepts_first_responder(_this: &Object, _cmd: Sel) -> bool {
+    false
 }
 
-extern "C" fn text_field_becomes_first_responder(_this: &Object, _cmd: Sel) -> BOOL {
-    NO
+extern "C" fn text_field_becomes_first_responder(_this: &Object, _cmd: Sel) -> bool {
+    false
 }
 
 // ---------------- CLASS REGISTRATION ----------------
-
-fn register_non_activating_panel_class() {
-    REGISTER_NON_ACTIVATING_PANEL.call_once(|| {
-        let superclass = Class::get("NSPanel").unwrap();
-        let mut decl = ClassDecl::new("NonActivatingPanel", superclass).unwrap();
-
-        unsafe {
-            decl.add_method(
-                sel!(canBecomeKeyWindow),
-                panel_can_become_key_window as extern "C" fn(&Object, Sel) -> BOOL,
-            );
-            decl.add_method(
-                sel!(canBecomeMainWindow),
-                panel_can_become_main_window as extern "C" fn(&Object, Sel) -> BOOL,
-            );
-        }
-
-        decl.register();
-    });
-}
 
 fn register_button_handler_class() {
     REGISTER_BUTTON_HANDLER.call_once(|| {
@@ -396,11 +181,7 @@ fn register_draggable_view_class() {
             );
             decl.add_method(
                 sel!(acceptsFirstMouse:),
-                accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> BOOL,
-            );
-            decl.add_method(
-                sel!(acceptsFirstResponder),
-                view_accepts_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
+                accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> bool,
             );
         }
         decl.register();
@@ -415,7 +196,7 @@ fn register_focusless_text_field_class() {
         unsafe {
             decl.add_method(
                 sel!(acceptsFirstMouse:),
-                text_field_accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> BOOL,
+                text_field_accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> bool,
             );
             decl.add_method(
                 sel!(mouseDown:),
@@ -423,11 +204,11 @@ fn register_focusless_text_field_class() {
             );
             decl.add_method(
                 sel!(acceptsFirstResponder),
-                text_field_accepts_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
+                text_field_accepts_first_responder as extern "C" fn(&Object, Sel) -> bool,
             );
             decl.add_method(
                 sel!(becomeFirstResponder),
-                text_field_becomes_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
+                text_field_becomes_first_responder as extern "C" fn(&Object, Sel) -> bool,
             );
         }
         decl.register();
@@ -438,34 +219,10 @@ fn register_space_change_handler_class() {
     REGISTER_SPACE_CHANGE_HANDLER.call_once(|| {
         let superclass = Class::get("NSObject").unwrap();
         let mut decl = ClassDecl::new("SpaceChangeHandler", superclass).unwrap();
-
         unsafe {
             decl.add_method(
                 sel!(spaceDidChange:),
                 space_did_change as extern "C" fn(&Object, Sel, id),
-            );
-        }
-        decl.register();
-    });
-}
-
-fn register_focusless_button_class() {
-    REGISTER_FOCUSLESS_BUTTON.call_once(|| {
-        let superclass = Class::get("NSButton").unwrap();
-        let mut decl = ClassDecl::new("FocuslessButton", superclass).unwrap();
-
-        unsafe {
-            decl.add_method(
-                sel!(acceptsFirstMouse:),
-                button_accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> BOOL,
-            );
-            decl.add_method(
-                sel!(acceptsFirstResponder),
-                button_accepts_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
-            );
-            decl.add_method(
-                sel!(needsPanelToBecomeKey),
-                button_needs_panel_to_become_key as extern "C" fn(&Object, Sel) -> BOOL,
             );
         }
         decl.register();
@@ -501,29 +258,24 @@ fn main() {
     unsafe {
         let _pool = NSAutoreleasePool::new(nil);
 
-        // Register all custom classes
-        register_non_activating_panel_class();
         register_button_handler_class();
         register_draggable_view_class();
         register_focusless_text_field_class();
         register_space_change_handler_class();
-        register_focusless_button_class();
 
-        // Set up Desktop/Space change notification observer
+        // Set up space change observer
         let space_handler_class = Class::get("SpaceChangeHandler").unwrap();
         let space_handler: id = msg_send![space_handler_class, new];
-        
         let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
         let notification_center: id = msg_send![workspace, notificationCenter];
-        
         let notification_name = NSString::alloc(nil).init_str("NSWorkspaceActiveSpaceDidChangeNotification");
-        let _: () = msg_send![notification_center, 
-            addObserver:space_handler 
-            selector:sel!(spaceDidChange:) 
-            name:notification_name 
+        let _: () = msg_send![notification_center,
+            addObserver:space_handler
+            selector:sel!(spaceDidChange:)
+            name:notification_name
             object:nil
         ];
-        log_to_file("Desktop/Space change observer registered.");
+        log_to_file("Space change observer registered");
 
         let app = NSApp();
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory);
@@ -533,79 +285,50 @@ fn main() {
             NSSize::new(400.0, 300.0),
         );
 
-        // Use regular NSWindow (not NSPanel) for reliable visibility
-        // NSPanel with NonActivatingPanelMask might be preventing display
-        let window_class = Class::get("NSWindow").unwrap();
-        let window: id = msg_send![window_class, alloc];
-        
-        // Simple borderless style mask
-        let style_mask = NSWindowStyleMask::NSBorderlessWindowMask;
-        
+        let panel_class = Class::get("NSPanel").unwrap();
+        let window: id = msg_send![panel_class, alloc];
         let window: id = msg_send![window,
             initWithContentRect:frame
-            styleMask:style_mask
+            styleMask:NSWindowStyleMask::NSBorderlessWindowMask
             backing:NSBackingStoreType::NSBackingStoreBuffered
             defer:NO
         ];
-        
-        log_to_file("Window created with NSWindow (not NSPanel)");
 
         let ns_color_class = Class::get("NSColor").unwrap();
-        // Use BRIGHT RED so it's very visible!
-        let red_color: id = msg_send![ns_color_class, redColor];
-        let _: () = msg_send![window, setBackgroundColor: red_color];
+        let black_color: id = msg_send![ns_color_class, blackColor];
+        let _: () = msg_send![window, setBackgroundColor: black_color];
         let _: () = msg_send![window, setOpaque: YES];
-        let _: () = msg_send![window, setHasShadow: YES];  // Add shadow to help see it
-        let _: () = msg_send![window, setAlphaValue: 1.0_f64];  // Fully opaque
+        let _: () = msg_send![window, setHasShadow: NO];
         
-        // Use SEB's technique: NSScreenSaverWindowLevel + 2 (SEB uses +1, we use +2 to be above)
-        // From SEB source: they remap levels to NSScreenSaverWindowLevel+1
-        let window_level: i64 = kCGScreenSaverWindowLevel + 2;
-        log_to_file(&format!("Using window level: {} (kCGScreenSaverWindowLevel+2)", window_level));
+        // Use high window level to appear above SEB!
+        let _: () = msg_send![window, setLevel: WINDOW_LEVEL];
+        log_to_file(&format!("Window level set to {} (kCGScreenSaverWindowLevel+2)", WINDOW_LEVEL));
         
-        let _: () = msg_send![window, setLevel: window_level];
-        log_to_file("Window level set successfully");
-        
-        // Get window number for logging
-        let window_number: i64 = msg_send![window, windowNumber];
-        log_to_file(&format!("Window number: {}", window_number));
-        
-        // Skip CGS private API - it doesn't work reliably
-        log_to_file("Skipping CGS private API (not reliable)");
-        log_to_file("Setting window sharing type...");
         let _: () = msg_send![window, setSharingType: NSWindowSharingNone];
-        
-        // NOTE: setFloatingPanel and setBecomesKeyOnlyIfNeeded are NSPanel-only methods
-        // We're using NSWindow now, so skip those
-        log_to_file("Setting HidesOnDeactivate to NO...");
+        let _: () = msg_send![window, setFloatingPanel: YES];
+        let _: () = msg_send![window, setBecomesKeyOnlyIfNeeded: YES];
         let _: () = msg_send![window, setHidesOnDeactivate: NO];
 
-        log_to_file("Setting collection behavior...");
         let behavior = NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary;
 
         let _: () = msg_send![window, setCollectionBehavior: behavior];
         let _: () = msg_send![window, setMovableByWindowBackground: YES];
-        log_to_file("Window behavior configured");
         
-        // Store window reference for desktop change handler
+        // Store window for space change handler
         WINDOW.store(window as *mut Object, Ordering::SeqCst);
-        log_to_file("Window stored in global reference");
 
-        // Create draggable content view
         let draggable_class = Class::get("DraggableView").unwrap();
         let content_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
         let draggable_view: id = msg_send![draggable_class, alloc];
         let draggable_view: id = msg_send![draggable_view, initWithFrame: content_frame];
         let _: () = msg_send![window, setContentView: draggable_view];
 
-        // Button handler
         let handler_class = Class::get("ButtonHandler").unwrap();
         let handler: id = msg_send![handler_class, new];
 
-        // Use FocuslessButton instead of regular NSButton
-        let button_class = Class::get("FocuslessButton").unwrap();
+        let button_class = Class::get("NSButton").unwrap();
 
         // Close button
         let close_button: id = msg_send![button_class, alloc];
@@ -616,7 +339,6 @@ fn main() {
         let _: () = msg_send![close_button, setBezelStyle: NSBezelStyleRounded];
         let _: () = msg_send![close_button, setTarget: handler];
         let _: () = msg_send![close_button, setAction: sel!(closeButtonClicked:)];
-        let _: () = msg_send![close_button, setRefusesFirstResponder: YES];
         let _: () = msg_send![draggable_view, addSubview: close_button];
 
         // Test button
@@ -628,7 +350,6 @@ fn main() {
         let _: () = msg_send![test_button, setBezelStyle: NSBezelStyleRounded];
         let _: () = msg_send![test_button, setTarget: handler];
         let _: () = msg_send![test_button, setAction: sel!(testButtonClicked:)];
-        let _: () = msg_send![test_button, setRefusesFirstResponder: YES];
         let _: () = msg_send![draggable_view, addSubview: test_button];
 
         // Text field
@@ -637,7 +358,7 @@ fn main() {
         let text_field_frame = NSRect::new(NSPoint::new(20.0, 135.0), NSSize::new(250.0, 30.0));
         let text_field: id = msg_send![text_field, initWithFrame: text_field_frame];
 
-        let placeholder = NSString::alloc(nil).init_str("Click to type...");
+        let placeholder = NSString::alloc(nil).init_str("Type here...");
         let _: () = msg_send![text_field, setPlaceholderString: placeholder];
         let _: () = msg_send![text_field, setBezeled: YES];
         let _: () = msg_send![text_field, setDrawsBackground: YES];
@@ -646,12 +367,11 @@ fn main() {
         let _: () = msg_send![text_field, setBackgroundColor: white_color];
         let _: () = msg_send![text_field, setEditable: NO];
         let _: () = msg_send![text_field, setSelectable: NO];
-        let _: () = msg_send![text_field, setFocusRingType: NSFocusRingTypeNone];
 
         let _: () = msg_send![draggable_view, addSubview: text_field];
         TEXT_FIELD.store(text_field as *mut Object, Ordering::SeqCst);
 
-        // Global key event monitor
+        // Global key event monitor (using NSEvent, not CGEventTap)
         let ns_event_class = Class::get("NSEvent").unwrap();
         let mask: u64 = 1 << NSEventTypeKeyDown;
 
@@ -684,7 +404,6 @@ fn main() {
                     } else if key_code == kVK_Return {
                         let empty = NSString::alloc(nil).init_str("");
                         let _: () = msg_send![tf, setStringValue: empty];
-                        log_to_file("Submitted!");
                         return nil;
                     } else {
                         let _: () = msg_send![mutable_string, appendString: characters];
@@ -697,95 +416,12 @@ fn main() {
             nil
         });
         let block = block.copy();
-
         let _monitor: id = msg_send![ns_event_class, addGlobalMonitorForEventsMatchingMask:mask handler:&*block];
 
-        // Local monitor
-        let local_block = block::ConcreteBlock::new(move |event: id| -> id {
-            if !TEXT_FIELD_ACTIVE.load(Ordering::SeqCst) {
-                return event;
-            }
-
-            let key_code: u16 = msg_send![event, keyCode];
-            let modifier_flags: u64 = msg_send![event, modifierFlags];
-
-            if should_pass_through_key(key_code, modifier_flags) {
-                return event;
-            }
-
-            let tf = TEXT_FIELD.load(Ordering::SeqCst);
-            if !tf.is_null() {
-                let characters: id = msg_send![event, characters];
-                if characters != nil {
-                    let current_text: id = msg_send![tf, stringValue];
-                    let mutable_string: id = msg_send![class!(NSMutableString), alloc];
-                    let mutable_string: id = msg_send![mutable_string, initWithString: current_text];
-
-                    if key_code == kVK_Delete {
-                        let length: usize = msg_send![mutable_string, length];
-                        if length > 0 {
-                            let range = cocoa::foundation::NSRange::new((length - 1) as u64, 1);
-                            let _: () = msg_send![mutable_string, deleteCharactersInRange: range];
-                        }
-                    } else if key_code == kVK_Return {
-                        let empty = NSString::alloc(nil).init_str("");
-                        let _: () = msg_send![tf, setStringValue: empty];
-                        return nil;
-                    } else {
-                        let _: () = msg_send![mutable_string, appendString: characters];
-                    }
-
-                    let _: () = msg_send![tf, setStringValue: mutable_string];
-                }
-            }
-
-            nil
-        });
-        let local_block = local_block.copy();
-        let _local_monitor: id = msg_send![ns_event_class, addLocalMonitorForEventsMatchingMask:mask handler:&*local_block];
-
         let _: () = msg_send![window, center];
-        
-        // EXPLICITLY show the window with multiple methods
-        let _: () = msg_send![window, setIsVisible: YES];
-        let _: () = msg_send![window, makeKeyAndOrderFront: nil];
         let _: () = msg_send![window, orderFrontRegardless];
-        let _: () = msg_send![window, display];
-        
-        log_to_file("Window visibility commands sent: setIsVisible, makeKeyAndOrderFront, orderFrontRegardless, display");
-        
-        // Get window frame to log where it should appear
-        let window_frame: NSRect = msg_send![window, frame];
-        log_to_file(&format!("Window frame: x={}, y={}, w={}, h={}", 
-            window_frame.origin.x, window_frame.origin.y, 
-            window_frame.size.width, window_frame.size.height));
 
-        // Log comprehensive startup state
-        log_system_state("APP STARTUP");
-        log_to_file("Window created with Maximum window level and RED background");
-        
-        // Start heartbeat thread to continuously log status (even when SEB is running)
-        thread::spawn(|| {
-            let mut heartbeat_count: u64 = 0;
-            loop {
-                heartbeat_count += 1;
-                log_system_state(&format!("HEARTBEAT #{}", heartbeat_count));
-                
-                // Also try to reassert window visibility
-                unsafe {
-                    let window = WINDOW.load(Ordering::SeqCst);
-                    if !window.is_null() {
-                        let _: () = msg_send![window, setLevel: kCGMaximumWindowLevel];
-                        let _: () = msg_send![window, orderFrontRegardless];
-                    }
-                }
-                
-                // Sleep 5 seconds
-                std::thread::sleep(std::time::Duration::from_secs(5));
-            }
-        });
-        
-        log_to_file("Heartbeat thread started - will log every 5 seconds");
+        log_to_file("App started with window visible");
 
         app.run();
     }
