@@ -257,10 +257,10 @@ fn main() {
         let _: () = msg_send![window, setBecomesKeyOnlyIfNeeded: YES];
         let _: () = msg_send![window, setHidesOnDeactivate: NO]; // Vital for overlay
 
-        let behavior = NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
-            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
-            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary;
-
+        // SEB Mimicry: Canary in the Coal Mine
+        // stationary (16) + aux (256) + disallowTile (2048) + allSpaces (1) + ignoresCycle (4)
+        // Bitmask: 1 | 4 | 16 | 256 | 2048 = 2325
+        let behavior: cocoa::foundation::NSUInteger = 2325;
         let _: () = msg_send![window, setCollectionBehavior: behavior];
         let _: () = msg_send![window, setMovableByWindowBackground: YES];
 
@@ -403,17 +403,17 @@ fn main() {
                         unsafe {
                             // 2. DYNAMIC LEVEL ESCALATION
                             // Your logs showed SEB is at Layer 30. We set to Layer + 1.
-                            // CRITICAL FIX 3: Don't fly too close to the sun!
-                            // Window Server is at 2147483630 (Cursor Level).
-                            // If we go to 2147483631, we might be suppressed/invisible.
-                            // Strategy: If layer is HUGE, MATCH it, don't exceed it.
-                            // Rely on standard CGSOrderWindow to put us on top of the pile *within* that level.
+                            // CRITICAL FIX 3: Nuclear Option for Nuclear Levels
+                            // Window Server is at 2147483630.
+                            // 2147483631 failed. Matching 2147483630 failed.
+                            // Strategy: Go straight to MAX_INT (2147483647).
+                            // This is kCGMaximumWindowLevel.
                             
                             let mut target_level = top_window_layer + 1;
                             
-                            // If top is Cursor level or higher (MaxInt-ish), clamp to it.
-                            if top_window_layer >= 2147483630 {
-                                target_level = top_window_layer;
+                            // If top is high (Shielding/Cursor), Force Max.
+                            if top_window_layer >= 20000 {
+                                target_level = 2147483647; 
                             }
                             
                             // Prevent actual overflow check just in case
