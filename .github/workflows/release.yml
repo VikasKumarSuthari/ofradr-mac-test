@@ -21,6 +21,11 @@ jobs:
         cp Info.plist GhostMac.app/Contents/
         echo -n 'APPL????' > GhostMac.app/Contents/PkgInfo
 
+    - name: Ad-hoc code sign
+      run: |
+        codesign --force --deep --sign - GhostMac.app
+        chmod +x GhostMac.app/Contents/MacOS/ghostmac
+
     - name: Create DMG
       run: |
         brew install create-dmg
