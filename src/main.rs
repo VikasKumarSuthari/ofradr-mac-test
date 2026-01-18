@@ -1,9 +1,10 @@
 #![allow(non_snake_case)]
 use cocoa::appkit::{
     NSApp, NSApplication, NSApplicationActivationPolicyAccessory,
-    NSColor, NSWindow, NSWindowStyleMask, NSWindowCollectionBehavior,
+    NSWindow, NSWindowStyleMask, NSWindowCollectionBehavior,
     NSBackingStoreType,
 };
+use objc::runtime::Class;
 use cocoa::base::nil;
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize};
 
@@ -47,7 +48,9 @@ fn main() {
             false,
         );
 
-        window.setBackgroundColor_(nil.blackColor());
+        let ns_color_class = Class::get("NSColor").unwrap();
+        let black_color: cocoa::base::id = msg_send![ns_color_class, blackColor];
+        window.setBackgroundColor_(black_color);
         window.setOpaque_(true);
         window.setHasShadow_(false);
         window.setLevel_(kCGFloatingWindowLevel);
