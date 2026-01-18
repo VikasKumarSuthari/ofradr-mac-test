@@ -23,8 +23,10 @@ extern "C" {
 }
 type CGSConnection = *mut c_void;
 
-// Window level constants
-const kCGFloatingWindowLevel: i64 = 5;
+// Window level constants - using very high level to stay above ALL windows
+// Standard levels: Normal=0, Floating=5, Dock=20, ScreenSaver=1000, Overlay=102
+// Using a very high value to ensure we're always on top
+const kCGFloatingWindowLevel: i64 = 2147483631; // CGWindowLevelForKey(kCGMaximumWindowLevelKey) - near max
 
 fn main() {
     unsafe {
