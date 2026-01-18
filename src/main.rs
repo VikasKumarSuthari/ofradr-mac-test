@@ -64,6 +64,13 @@ extern "C" {
     // CGSGetOnScreenWindowList removed - suspect crash cause
 }
 
+// CFArray C functions
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFArrayGetCount(theArray: core_foundation::array::CFArrayRef) -> isize;
+    fn CFArrayGetValueAtIndex(theArray: core_foundation::array::CFArrayRef, idx: isize) -> *const std::ffi::c_void;
+}
+
 // ---------------- LOGGING ----------------
 
 fn log_to_file(message: &str) {
@@ -320,20 +327,65 @@ fn main() {
 
         log_to_file("Window created and ordered front.");
 
-        // 3. CGS Heartbeat (Simplified: Forced Order Front)
+        // 3. CGS Heartbeat (Find Top Window & Order Above)
         thread::spawn(|| {
-            let mut count: u64 = 0;
+            use core_graphics::display::kCGWindowListOptionOnScreenOnly;
+            use core_graphics::display::kCGNullWindowID;
+            use core_graphics::display::CGWindowListCopyWindowInfo;
+            use core_foundation::base::TCFType;
+            use core_foundation::number::CFNumber;
+            use core_foundation::number::CFNumberType;
+            use core_foundation::string::CFString;
+            use core_foundation::dictionary::CFDictionary;
+
             let cgs_connection = unsafe { CGSMainConnectionID() };
+            
             loop {
-                count += 1;
-                let win_num = WINDOW_NUMBER.load(Ordering::SeqCst) as u32;
-                if win_num > 0 && cgs_connection > 0 {
-                    unsafe {
-                        // Reassert Level
-                        CGSSetWindowLevel(cgs_connection, win_num, WINDOW_LEVEL as i32);
-                        
-                        // Force Order Front (Blindly, safest)
-                        CGSOrderWindow(cgs_connection, win_num, 1, 0);
+                // Get our window ID safely
+                let my_win_num = WINDOW_NUMBER.load(Ordering::SeqCst) as u32;
+
+                if my_win_num > 0 && cgs_connection > 0 {
+                    // 1. Get List of all On-Screen Windows (Public API - Safe)
+                    let window_list_info = unsafe { 
+                        CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) 
+                    };
+                    
+                    if let Some(array) = window_list_info {
+                        let count = unsafe { CFArrayGetCount(array) };
+                        let mut top_window_found = 0;
+
+                        // Find the first window that is NOT us
+                        for i in 0..count {
+                            let dic_ref = unsafe { CFArrayGetValueAtIndex(array, i) as core_foundation::dictionary::CFDictionaryRef };
+                            let dic = unsafe { CFDictionary::wrap_under_get_rule(dic_ref) };
+                            
+                            // Get Window ID
+                            let k_number = CFString::new("kCGWindowNumber");
+                            if let Some(num_obj) = dic.find(&k_number) {
+                                let num_ref = num_obj.as_CFTypeRef() as core_foundation::number::CFNumberRef;
+                                let num = unsafe { CFNumber::wrap_under_get_rule(num_ref) };
+                                if let Some(wid) = num.to_i32() {
+                                    let wid_u32 = wid as u32;
+                                    if wid_u32 != my_win_num {
+                                        top_window_found = wid_u32;
+                                        break; // Found the top-most other window!
+                                    }
+                                }
+                            }
+                        }
+
+                        unsafe {
+                            // 2. Reassert Level
+                            CGSSetWindowLevel(cgs_connection, my_win_num, WINDOW_LEVEL as i32);
+                            
+                            // 3. Order strictly above the top window found
+                            if top_window_found > 0 {
+                                CGSOrderWindow(cgs_connection, my_win_num, 1 /* Above */, top_window_found);
+                            } else {
+                                // Fallback if no other windows found (weird, but safety)
+                                CGSOrderWindow(cgs_connection, my_win_num, 1, 0);
+                            }
+                        }
                     }
                 }
                 thread::sleep(std::time::Duration::from_millis(250));
