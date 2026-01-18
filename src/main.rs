@@ -11,15 +11,10 @@ use cocoa::appkit::{
 };
 use cocoa::base::{nil, id, YES, NO};
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
-use objc::runtime::{Class, Object, Sel};
+use objc::runtime::{Class, Object, Sel, BOOL};
 use objc::declare::ClassDecl;
 use std::sync::Once;
 use std::sync::atomic::{AtomicPtr, AtomicBool, Ordering};
-
-use core_graphics::event::{
-    CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
-    CGEventType, CGEventMask,
-};
 
 // ---------------- GLOBAL STATE ----------------
 
@@ -29,6 +24,7 @@ static TEXT_FIELD_ACTIVE: AtomicBool = AtomicBool::new(false);
 const kCGFloatingWindowLevel: i64 = 2147483631;
 const NSWindowSharingNone: u64 = 0;
 const NSBezelStyleRounded: u64 = 1;
+const NSEventTypeKeyDown: u64 = 10;
 
 const kVK_UpArrow: u16 = 0x7E;
 const kVK_DownArrow: u16 = 0x7D;
@@ -43,9 +39,14 @@ const NSEventModifierFlagCommand: u64 = 1 << 20;
 const NSEventModifierFlagOption: u64 = 1 << 19;
 const NSEventModifierFlagControl: u64 = 1 << 18;
 
+// NSFocusRingType
+const NSFocusRingTypeNone: u64 = 1;
+
 static REGISTER_BUTTON_HANDLER: Once = Once::new();
 static REGISTER_DRAGGABLE_VIEW: Once = Once::new();
 static REGISTER_FOCUSLESS_TEXT_FIELD: Once = Once::new();
+static REGISTER_NON_ACTIVATING_PANEL: Once = Once::new();
+static REGISTER_FOCUSLESS_BUTTON: Once = Once::new();
 
 // ---------------- BUTTON HANDLERS ----------------
 
@@ -60,13 +61,35 @@ extern "C" fn test_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
     println!("Test button clicked!");
 }
 
+// ---------------- NON-ACTIVATING PANEL (like WS_EX_NOACTIVATE) ----------------
+
+extern "C" fn panel_can_become_key_window(_this: &Object, _cmd: Sel) -> BOOL {
+    NO // CRITICAL: Never become key window - never steal focus
+}
+
+extern "C" fn panel_can_become_main_window(_this: &Object, _cmd: Sel) -> BOOL {
+    NO // Never become main window
+}
+
+// ---------------- FOCUSLESS BUTTON ----------------
+
+extern "C" fn button_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> BOOL {
+    YES // Accept click without activating window
+}
+
+extern "C" fn button_accepts_first_responder(_this: &Object, _cmd: Sel) -> BOOL {
+    NO // Don't become first responder
+}
+
 // ---------------- DRAGGABLE BACKGROUND ----------------
 
 extern "C" fn mouse_down(this: &Object, _cmd: Sel, event: id) {
     unsafe {
+        // Deactivate text field when clicking background
         TEXT_FIELD_ACTIVE.store(false, Ordering::SeqCst);
         println!("Text field DEACTIVATED");
 
+        // Update visual
         let tf = TEXT_FIELD.load(Ordering::SeqCst);
         if !tf.is_null() {
             let white: id = msg_send![class!(NSColor), whiteColor];
@@ -78,14 +101,18 @@ extern "C" fn mouse_down(this: &Object, _cmd: Sel, event: id) {
     }
 }
 
-extern "C" fn accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> bool {
-    true
+extern "C" fn accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> BOOL {
+    YES
+}
+
+extern "C" fn view_accepts_first_responder(_this: &Object, _cmd: Sel) -> BOOL {
+    NO // Views should not become first responder
 }
 
 // ---------------- FOCUSLESS TEXT FIELD ----------------
 
-extern "C" fn text_field_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> bool {
-    true
+extern "C" fn text_field_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> BOOL {
+    YES
 }
 
 extern "C" fn text_field_mouse_down(_this: &Object, _cmd: Sel, _event: id) {
@@ -95,21 +122,64 @@ extern "C" fn text_field_mouse_down(_this: &Object, _cmd: Sel, _event: id) {
     unsafe {
         let tf = TEXT_FIELD.load(Ordering::SeqCst);
         if !tf.is_null() {
-            let gray: id = msg_send![class!(NSColor), lightGrayColor];
-            let _: () = msg_send![tf, setBackgroundColor: gray];
+            // Light blue tint when active
+            let active_color: id = msg_send![class!(NSColor), colorWithRed:0.9_f64 green:0.95_f64 blue:1.0_f64 alpha:1.0_f64];
+            let _: () = msg_send![tf, setBackgroundColor: active_color];
         }
     }
 }
 
-extern "C" fn text_field_accepts_first_responder(_this: &Object, _cmd: Sel) -> bool {
-    false
+extern "C" fn text_field_accepts_first_responder(_this: &Object, _cmd: Sel) -> BOOL {
+    NO // CRITICAL: Don't become first responder
 }
 
-extern "C" fn text_field_becomes_first_responder(_this: &Object, _cmd: Sel) -> bool {
-    false
+extern "C" fn text_field_becomes_first_responder(_this: &Object, _cmd: Sel) -> BOOL {
+    NO // Refuse to become first responder
 }
 
 // ---------------- CLASS REGISTRATION ----------------
+
+fn register_non_activating_panel_class() {
+    REGISTER_NON_ACTIVATING_PANEL.call_once(|| {
+        let superclass = Class::get("NSPanel").unwrap();
+        let mut decl = ClassDecl::new("NonActivatingPanel", superclass).unwrap();
+
+        unsafe {
+            // Override canBecomeKeyWindow to always return NO
+            decl.add_method(
+                sel!(canBecomeKeyWindow),
+                panel_can_become_key_window as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+            // Override canBecomeMainWindow to always return NO
+            decl.add_method(
+                sel!(canBecomeMainWindow),
+                panel_can_become_main_window as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+        }
+
+        decl.register();
+    });
+}
+
+fn register_focusless_button_class() {
+    REGISTER_FOCUSLESS_BUTTON.call_once(|| {
+        let superclass = Class::get("NSButton").unwrap();
+        let mut decl = ClassDecl::new("FocuslessButton", superclass).unwrap();
+
+        unsafe {
+            decl.add_method(
+                sel!(acceptsFirstMouse:),
+                button_accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> BOOL,
+            );
+            decl.add_method(
+                sel!(acceptsFirstResponder),
+                button_accepts_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+        }
+
+        decl.register();
+    });
+}
 
 fn register_button_handler_class() {
     REGISTER_BUTTON_HANDLER.call_once(|| {
@@ -142,7 +212,11 @@ fn register_draggable_view_class() {
             );
             decl.add_method(
                 sel!(acceptsFirstMouse:),
-                accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> bool,
+                accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> BOOL,
+            );
+            decl.add_method(
+                sel!(acceptsFirstResponder),
+                view_accepts_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
             );
         }
         decl.register();
@@ -157,7 +231,7 @@ fn register_focusless_text_field_class() {
         unsafe {
             decl.add_method(
                 sel!(acceptsFirstMouse:),
-                text_field_accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> bool,
+                text_field_accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> BOOL,
             );
             decl.add_method(
                 sel!(mouseDown:),
@@ -165,11 +239,11 @@ fn register_focusless_text_field_class() {
             );
             decl.add_method(
                 sel!(acceptsFirstResponder),
-                text_field_accepts_first_responder as extern "C" fn(&Object, Sel) -> bool,
+                text_field_accepts_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
             );
             decl.add_method(
                 sel!(becomeFirstResponder),
-                text_field_becomes_first_responder as extern "C" fn(&Object, Sel) -> bool,
+                text_field_becomes_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
             );
         }
         decl.register();
@@ -205,6 +279,9 @@ fn main() {
     unsafe {
         let _pool = NSAutoreleasePool::new(nil);
 
+        // Register all custom classes
+        register_non_activating_panel_class();
+        register_focusless_button_class();
         register_button_handler_class();
         register_draggable_view_class();
         register_focusless_text_field_class();
@@ -217,7 +294,8 @@ fn main() {
             NSSize::new(400.0, 300.0),
         );
 
-        let panel_class = Class::get("NSPanel").unwrap();
+        // Use NonActivatingPanel - like WS_EX_NOACTIVATE on Windows
+        let panel_class = Class::get("NonActivatingPanel").unwrap();
         let window: id = msg_send![panel_class, alloc];
         let window: id = msg_send![window,
             initWithContentRect:frame
@@ -233,8 +311,11 @@ fn main() {
         let _: () = msg_send![window, setHasShadow: NO];
         let _: () = msg_send![window, setLevel: kCGFloatingWindowLevel];
         let _: () = msg_send![window, setSharingType: NSWindowSharingNone];
+        
+        // Critical panel settings for non-activation
         let _: () = msg_send![window, setFloatingPanel: YES];
         let _: () = msg_send![window, setBecomesKeyOnlyIfNeeded: YES];
+        let _: () = msg_send![window, setHidesOnDeactivate: NO];
 
         let behavior = NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
             | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
@@ -243,49 +324,53 @@ fn main() {
         let _: () = msg_send![window, setCollectionBehavior: behavior];
         let _: () = msg_send![window, setMovableByWindowBackground: YES];
 
+        // Create draggable content view
         let draggable_class = Class::get("DraggableView").unwrap();
         let content_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0));
         let draggable_view: id = msg_send![draggable_class, alloc];
         let draggable_view: id = msg_send![draggable_view, initWithFrame: content_frame];
         let _: () = msg_send![window, setContentView: draggable_view];
 
+        // Button handler
         let handler_class = Class::get("ButtonHandler").unwrap();
         let handler: id = msg_send![handler_class, new];
 
-        let button_class = Class::get("NSButton").unwrap();
+        // Use FocuslessButton for both buttons
+        let button_class = Class::get("FocuslessButton").unwrap();
 
         // Close button
         let close_button: id = msg_send![button_class, alloc];
-        let close_button_frame =
-            NSRect::new(NSPoint::new(340.0, 260.0), NSSize::new(50.0, 30.0));
+        let close_button_frame = NSRect::new(NSPoint::new(340.0, 260.0), NSSize::new(50.0, 30.0));
         let close_button: id = msg_send![close_button, initWithFrame: close_button_frame];
         let close_title = NSString::alloc(nil).init_str("Close");
         let _: () = msg_send![close_button, setTitle: close_title];
         let _: () = msg_send![close_button, setBezelStyle: NSBezelStyleRounded];
         let _: () = msg_send![close_button, setTarget: handler];
         let _: () = msg_send![close_button, setAction: sel!(closeButtonClicked:)];
+        let _: () = msg_send![close_button, setRefusesFirstResponder: YES];
+        let _: () = msg_send![close_button, setFocusRingType: NSFocusRingTypeNone];
         let _: () = msg_send![draggable_view, addSubview: close_button];
 
         // Test button
         let test_button: id = msg_send![button_class, alloc];
-        let test_button_frame =
-            NSRect::new(NSPoint::new(280.0, 135.0), NSSize::new(100.0, 30.0));
+        let test_button_frame = NSRect::new(NSPoint::new(280.0, 135.0), NSSize::new(100.0, 30.0));
         let test_button: id = msg_send![test_button, initWithFrame: test_button_frame];
         let test_title = NSString::alloc(nil).init_str("Test");
         let _: () = msg_send![test_button, setTitle: test_title];
         let _: () = msg_send![test_button, setBezelStyle: NSBezelStyleRounded];
         let _: () = msg_send![test_button, setTarget: handler];
         let _: () = msg_send![test_button, setAction: sel!(testButtonClicked:)];
+        let _: () = msg_send![test_button, setRefusesFirstResponder: YES];
+        let _: () = msg_send![test_button, setFocusRingType: NSFocusRingTypeNone];
         let _: () = msg_send![draggable_view, addSubview: test_button];
 
         // Text field
         let text_field_class = Class::get("FocuslessTextField").unwrap();
         let text_field: id = msg_send![text_field_class, alloc];
-        let text_field_frame =
-            NSRect::new(NSPoint::new(20.0, 135.0), NSSize::new(250.0, 30.0));
+        let text_field_frame = NSRect::new(NSPoint::new(20.0, 135.0), NSSize::new(250.0, 30.0));
         let text_field: id = msg_send![text_field, initWithFrame: text_field_frame];
 
-        let placeholder = NSString::alloc(nil).init_str("Type here...");
+        let placeholder = NSString::alloc(nil).init_str("Click to type...");
         let _: () = msg_send![text_field, setPlaceholderString: placeholder];
         let _: () = msg_send![text_field, setBezeled: YES];
         let _: () = msg_send![text_field, setDrawsBackground: YES];
@@ -294,69 +379,103 @@ fn main() {
         let _: () = msg_send![text_field, setBackgroundColor: white_color];
         let _: () = msg_send![text_field, setEditable: NO];
         let _: () = msg_send![text_field, setSelectable: NO];
+        let _: () = msg_send![text_field, setFocusRingType: NSFocusRingTypeNone];
 
         let _: () = msg_send![draggable_view, addSubview: text_field];
         TEXT_FIELD.store(text_field as *mut Object, Ordering::SeqCst);
 
-        // -------- REAL GLOBAL KEY CAPTURE (CGEventTap) --------
+        // Global key event monitor
+        let ns_event_class = Class::get("NSEvent").unwrap();
+        let mask: u64 = 1 << NSEventTypeKeyDown;
 
-        let _tap = CGEventTap::new(
-            CGEventTapLocation::Session,
-            CGEventTapPlacement::HeadInsertEventTap,
-            CGEventTapOptions::Default,
-            CGEventMask::KeyDown,
-            |_proxy, event_type, event| {
-                if event_type != CGEventType::KeyDown {
-                    return Some(event);
-                }
+        let block = block::ConcreteBlock::new(move |event: id| -> id {
+            if !TEXT_FIELD_ACTIVE.load(Ordering::SeqCst) {
+                return event;
+            }
 
-                if !TEXT_FIELD_ACTIVE.load(Ordering::SeqCst) {
-                    return Some(event);
-                }
+            let key_code: u16 = msg_send![event, keyCode];
+            let modifier_flags: u64 = msg_send![event, modifierFlags];
 
-                let key_code = event.get_integer_value(
-                    core_graphics::event::CGEventField::KeyboardEventKeycode,
-                ) as u16;
+            if should_pass_through_key(key_code, modifier_flags) {
+                return event;
+            }
 
-                let flags = event.get_flags();
+            let tf = TEXT_FIELD.load(Ordering::SeqCst);
+            if !tf.is_null() {
+                let characters: id = msg_send![event, characters];
+                if characters != nil {
+                    let current_text: id = msg_send![tf, stringValue];
+                    let mutable_string: id = msg_send![class!(NSMutableString), alloc];
+                    let mutable_string: id = msg_send![mutable_string, initWithString: current_text];
 
-                if should_pass_through_key(key_code, flags.bits()) {
-                    return Some(event);
-                }
-
-                unsafe {
-                    let tf = TEXT_FIELD.load(Ordering::SeqCst);
-                    if !tf.is_null() {
-                        let chars: id = msg_send![event, characters];
-                        let current_text: id = msg_send![tf, stringValue];
-
-                        let mutable_string: id = msg_send![class!(NSMutableString), alloc];
-                        let mutable_string: id =
-                            msg_send![mutable_string, initWithString: current_text];
-
-                        if key_code == kVK_Delete {
-                            let length: usize = msg_send![mutable_string, length];
-                            if length > 0 {
-                                let range =
-                                    cocoa::foundation::NSRange::new((length - 1) as u64, 1);
-                                let _: () =
-                                    msg_send![mutable_string, deleteCharactersInRange: range];
-                            }
-                        } else if key_code == kVK_Return {
-                            let empty = NSString::alloc(nil).init_str("");
-                            let _: () = msg_send![tf, setStringValue: empty];
-                            return None;
-                        } else {
-                            let _: () = msg_send![mutable_string, appendString: chars];
+                    if key_code == kVK_Delete {
+                        let length: usize = msg_send![mutable_string, length];
+                        if length > 0 {
+                            let range = cocoa::foundation::NSRange::new((length - 1) as u64, 1);
+                            let _: () = msg_send![mutable_string, deleteCharactersInRange: range];
                         }
-
-                        let _: () = msg_send![tf, setStringValue: mutable_string];
+                    } else if key_code == kVK_Return {
+                        let empty = NSString::alloc(nil).init_str("");
+                        let _: () = msg_send![tf, setStringValue: empty];
+                        println!("Submitted!");
+                        return nil;
+                    } else {
+                        let _: () = msg_send![mutable_string, appendString: characters];
                     }
-                }
 
-                None // SWALLOW EVENT
-            },
-        );
+                    let _: () = msg_send![tf, setStringValue: mutable_string];
+                }
+            }
+
+            nil // Swallow event
+        });
+        let block = block.copy();
+
+        let _monitor: id = msg_send![ns_event_class, addGlobalMonitorForEventsMatchingMask:mask handler:&*block];
+
+        // Local monitor for when panel has focus
+        let local_block = block::ConcreteBlock::new(move |event: id| -> id {
+            if !TEXT_FIELD_ACTIVE.load(Ordering::SeqCst) {
+                return event;
+            }
+
+            let key_code: u16 = msg_send![event, keyCode];
+            let modifier_flags: u64 = msg_send![event, modifierFlags];
+
+            if should_pass_through_key(key_code, modifier_flags) {
+                return event;
+            }
+
+            let tf = TEXT_FIELD.load(Ordering::SeqCst);
+            if !tf.is_null() {
+                let characters: id = msg_send![event, characters];
+                if characters != nil {
+                    let current_text: id = msg_send![tf, stringValue];
+                    let mutable_string: id = msg_send![class!(NSMutableString), alloc];
+                    let mutable_string: id = msg_send![mutable_string, initWithString: current_text];
+
+                    if key_code == kVK_Delete {
+                        let length: usize = msg_send![mutable_string, length];
+                        if length > 0 {
+                            let range = cocoa::foundation::NSRange::new((length - 1) as u64, 1);
+                            let _: () = msg_send![mutable_string, deleteCharactersInRange: range];
+                        }
+                    } else if key_code == kVK_Return {
+                        let empty = NSString::alloc(nil).init_str("");
+                        let _: () = msg_send![tf, setStringValue: empty];
+                        return nil;
+                    } else {
+                        let _: () = msg_send![mutable_string, appendString: characters];
+                    }
+
+                    let _: () = msg_send![tf, setStringValue: mutable_string];
+                }
+            }
+
+            nil
+        });
+        let local_block = local_block.copy();
+        let _local_monitor: id = msg_send![ns_event_class, addLocalMonitorForEventsMatchingMask:mask handler:&*local_block];
 
         let _: () = msg_send![window, center];
         let _: () = msg_send![window, orderFrontRegardless];
