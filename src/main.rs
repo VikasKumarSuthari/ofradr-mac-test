@@ -503,23 +503,6 @@ fn main() {
         let local_block = local_block.copy();
         let _local_monitor: id = msg_send![ns_event_class, addLocalMonitorForEventsMatchingMask:mask handler:&*local_block];
 
-        // Set up a timer to periodically reassert the window level (every 0.5 seconds)
-        let timer_block = block::ConcreteBlock::new(move |_timer: id| {
-            let window_ptr = WINDOW.load(Ordering::SeqCst);
-            if !window_ptr.is_null() {
-                let _: () = msg_send![window_ptr, setLevel: kCGMaximumWindowLevel];
-                let _: () = msg_send![window_ptr, orderFrontRegardless];
-            }
-        });
-        let timer_block = timer_block.copy();
-        
-        let timer_class = Class::get("NSTimer").unwrap();
-        let _timer: id = msg_send![timer_class, 
-            scheduledTimerWithTimeInterval:0.5_f64 
-            repeats:YES 
-            block:&*timer_block
-        ];
-
         let _: () = msg_send![window, center];
         let _: () = msg_send![window, orderFrontRegardless];
 
