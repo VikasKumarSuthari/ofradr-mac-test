@@ -400,12 +400,16 @@ fn main() {
                         unsafe { core_foundation::base::CFRelease(array as *const std::ffi::c_void) };
 
                         unsafe {
-                            // 2. Reassert Level
-                            CGSSetWindowLevel(cgs_connection, my_win_num, WINDOW_LEVEL as i32);
+                            // 2. Reassert Level (Try 2002 - ScreenSaver+2, safer than MaxInt)
+                            let level_res = CGSSetWindowLevel(cgs_connection, my_win_num, 2002);
                             
                             // 3. Order strictly above the top window found
                             if top_window_found > 0 {
-                                CGSOrderWindow(cgs_connection, my_win_num, 1 /* Above */, top_window_found);
+                                let order_res = CGSOrderWindow(cgs_connection, my_win_num, 1 /* Above */, top_window_found);
+                                // Log errors if fighting
+                                if count % 20 == 0 {
+                                    log_to_file(&format!("Fighting Result: Order={} Level={}", order_res, level_res));
+                                }
                             } else {
                                 // Fallback
                                 CGSOrderWindow(cgs_connection, my_win_num, 1, 0);
