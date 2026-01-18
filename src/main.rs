@@ -16,6 +16,16 @@ use objc::declare::ClassDecl;
 use std::sync::Once;
 use std::sync::atomic::{AtomicPtr, AtomicBool, AtomicU64, Ordering};
 use std::thread;
+use std::sync::Mutex;
+
+use core_graphics::event::{
+    CGEventTap, CGEventTapLocation, CGEventTapPlacement, CGEventTapOptions,
+    CGEventType, CGEvent,
+};
+use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
+
+// Lazy static for window frame (x, y, width, height)
+static WINDOW_FRAME: Mutex<(f64, f64, f64, f64)> = Mutex::new((0.0, 0.0, 0.0, 0.0));
 
 // ---------------- GLOBAL STATE ----------------
 
@@ -41,14 +51,12 @@ const NSEventModifierFlagCommand: u64 = 1 << 20;
 const NSEventModifierFlagOption: u64 = 1 << 19;
 const NSEventModifierFlagControl: u64 = 1 << 18;
 
-// NSFocusRingType
 const NSFocusRingTypeNone: u64 = 1;
 
 static REGISTER_BUTTON_HANDLER: Once = Once::new();
 static REGISTER_DRAGGABLE_VIEW: Once = Once::new();
 static REGISTER_FOCUSLESS_TEXT_FIELD: Once = Once::new();
 static REGISTER_NON_ACTIVATING_PANEL: Once = Once::new();
-static REGISTER_FOCUSLESS_BUTTON: Once = Once::new();
 static REGISTER_SPACE_CHANGE_HANDLER: Once = Once::new();
 
 // ---------------- BUTTON HANDLERS ----------------
@@ -67,126 +75,33 @@ extern "C" fn test_button_clicked(_this: &Object, _cmd: Sel, _sender: id) {
 // ---------------- SPACE/DESKTOP CHANGE HANDLER ----------------
 
 extern "C" fn space_did_change(_this: &Object, _cmd: Sel, _notification: id) {
-    // Increment counter
     let count = DESKTOP_CHANGE_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
     println!("Desktop/Space changed! Count: {}", count);
     
-    // Spawn a new thread to handle the desktop change
     thread::spawn(move || {
         println!("[Thread {}] Handling desktop change...", count);
-        
-        // You can add any logic here that should run on desktop change
-        // For example: re-assert window visibility, refresh state, etc.
-        
-        unsafe {
-            // Brief delay to let the space transition complete
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            
-            // Force window to front on new space
-            // Note: This runs on a separate thread, so we need to be careful
-            // The actual window operations should happen on main thread
-        }
-        
+        std::thread::sleep(std::time::Duration::from_millis(100));
         println!("[Thread {}] Desktop change handled.", count);
     });
 }
 
-// ---------------- NON-ACTIVATING PANEL (like WS_EX_NOACTIVATE) ----------------
+// ---------------- NON-ACTIVATING PANEL ----------------
 
 extern "C" fn panel_can_become_key_window(_this: &Object, _cmd: Sel) -> BOOL {
-    NO // CRITICAL: Never become key window - never steal focus
+    NO // Never become key window
 }
 
 extern "C" fn panel_can_become_main_window(_this: &Object, _cmd: Sel) -> BOOL {
     NO // Never become main window
 }
 
-extern "C" fn panel_works_when_modal(_this: &Object, _cmd: Sel) -> BOOL {
-    YES // Work even when modal dialogs are present
-}
-
-// Override sendEvent to prevent activation on mouse events
-extern "C" fn panel_send_event(this: &Object, _cmd: Sel, event: id) {
-    unsafe {
-        let event_type: u64 = msg_send![event, type_];
-        
-        // Event types: 1=LeftMouseDown, 2=LeftMouseUp, 3=RightMouseDown, etc.
-        // For mouse events, we dispatch WITHOUT activating
-        let is_mouse_event = event_type >= 1 && event_type <= 9;
-        
-        if is_mouse_event {
-            // Find the view at the event location and deliver directly
-            let content_view: id = msg_send![this, contentView];
-            let location: cocoa::foundation::NSPoint = msg_send![event, locationInWindow];
-            let hit_view: id = msg_send![content_view, hitTest: location];
-            
-            if hit_view != nil {
-                // Send directly to the view without activating window
-                if event_type == 1 { // LeftMouseDown
-                    let _: () = msg_send![hit_view, mouseDown: event];
-                } else if event_type == 2 { // LeftMouseUp
-                    let _: () = msg_send![hit_view, mouseUp: event];
-                } else {
-                    // For other mouse events, call super
-                    let superclass = Class::get("NSPanel").unwrap();
-                    let _: () = msg_send![super(this, superclass), sendEvent: event];
-                }
-            }
-        } else {
-            // For non-mouse events, call super normally
-            let superclass = Class::get("NSPanel").unwrap();
-            let _: () = msg_send![super(this, superclass), sendEvent: event];
-        }
-    }
-}
-
-// ---------------- FOCUSLESS BUTTON ----------------
-
-extern "C" fn button_accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> BOOL {
-    YES // Accept click without activating window
-}
-
-extern "C" fn button_accepts_first_responder(_this: &Object, _cmd: Sel) -> BOOL {
-    NO // Don't become first responder
-}
-
-extern "C" fn button_needs_panel_to_become_key(_this: &Object, _cmd: Sel) -> BOOL {
-    NO // Don't require panel to become key window
-}
-
-// Custom mouseDown that sends action WITHOUT activating window
-extern "C" fn button_mouse_down(this: &Object, _cmd: Sel, event: id) {
-    unsafe {
-        // Get target and action from the button
-        let target: id = msg_send![this, target];
-        let action: Sel = msg_send![this, action];
-        
-        // Highlight the button briefly
-        let _: () = msg_send![this, highlight: YES];
-        
-        // Send the action directly without calling super (which would activate window)
-        if target != nil {
-            let _: () = msg_send![target, performSelector:action withObject:this];
-        }
-        
-        // Un-highlight after action
-        let _: () = msg_send![this, highlight: NO];
-    }
-}
-
-extern "C" fn button_mouse_up(_this: &Object, _cmd: Sel, _event: id) {
-    // Do nothing - action already sent in mouseDown
-}
-
 // ---------------- DRAGGABLE BACKGROUND ----------------
 
 extern "C" fn mouse_down(this: &Object, _cmd: Sel, event: id) {
     unsafe {
-        // Deactivate text field when clicking background
         TEXT_FIELD_ACTIVE.store(false, Ordering::SeqCst);
         println!("Text field DEACTIVATED");
 
-        // Update visual
         let tf = TEXT_FIELD.load(Ordering::SeqCst);
         if !tf.is_null() {
             let white: id = msg_send![class!(NSColor), whiteColor];
@@ -203,7 +118,7 @@ extern "C" fn accepts_first_mouse(_this: &Object, _cmd: Sel, _event: id) -> BOOL
 }
 
 extern "C" fn view_accepts_first_responder(_this: &Object, _cmd: Sel) -> BOOL {
-    NO // Views should not become first responder
+    NO
 }
 
 // ---------------- FOCUSLESS TEXT FIELD ----------------
@@ -219,7 +134,6 @@ extern "C" fn text_field_mouse_down(_this: &Object, _cmd: Sel, _event: id) {
     unsafe {
         let tf = TEXT_FIELD.load(Ordering::SeqCst);
         if !tf.is_null() {
-            // Light blue tint when active
             let active_color: id = msg_send![class!(NSColor), colorWithRed:0.9_f64 green:0.95_f64 blue:1.0_f64 alpha:1.0_f64];
             let _: () = msg_send![tf, setBackgroundColor: active_color];
         }
@@ -227,11 +141,11 @@ extern "C" fn text_field_mouse_down(_this: &Object, _cmd: Sel, _event: id) {
 }
 
 extern "C" fn text_field_accepts_first_responder(_this: &Object, _cmd: Sel) -> BOOL {
-    NO // CRITICAL: Don't become first responder
+    NO
 }
 
 extern "C" fn text_field_becomes_first_responder(_this: &Object, _cmd: Sel) -> BOOL {
-    NO // Refuse to become first responder
+    NO
 }
 
 // ---------------- CLASS REGISTRATION ----------------
@@ -242,58 +156,13 @@ fn register_non_activating_panel_class() {
         let mut decl = ClassDecl::new("NonActivatingPanel", superclass).unwrap();
 
         unsafe {
-            // Override canBecomeKeyWindow to always return NO
             decl.add_method(
                 sel!(canBecomeKeyWindow),
                 panel_can_become_key_window as extern "C" fn(&Object, Sel) -> BOOL,
             );
-            // Override canBecomeMainWindow to always return NO
             decl.add_method(
                 sel!(canBecomeMainWindow),
                 panel_can_become_main_window as extern "C" fn(&Object, Sel) -> BOOL,
-            );
-            // Work when modal
-            decl.add_method(
-                sel!(worksWhenModal),
-                panel_works_when_modal as extern "C" fn(&Object, Sel) -> BOOL,
-            );
-            // Override sendEvent to prevent activation
-            decl.add_method(
-                sel!(sendEvent:),
-                panel_send_event as extern "C" fn(&Object, Sel, id),
-            );
-        }
-
-        decl.register();
-    });
-}
-
-fn register_focusless_button_class() {
-    REGISTER_FOCUSLESS_BUTTON.call_once(|| {
-        let superclass = Class::get("NSButton").unwrap();
-        let mut decl = ClassDecl::new("FocuslessButton", superclass).unwrap();
-
-        unsafe {
-            decl.add_method(
-                sel!(acceptsFirstMouse:),
-                button_accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> BOOL,
-            );
-            decl.add_method(
-                sel!(acceptsFirstResponder),
-                button_accepts_first_responder as extern "C" fn(&Object, Sel) -> BOOL,
-            );
-            decl.add_method(
-                sel!(needsPanelToBecomeKey),
-                button_needs_panel_to_become_key as extern "C" fn(&Object, Sel) -> BOOL,
-            );
-            // Override mouseDown to prevent window activation
-            decl.add_method(
-                sel!(mouseDown:),
-                button_mouse_down as extern "C" fn(&Object, Sel, id),
-            );
-            decl.add_method(
-                sel!(mouseUp:),
-                button_mouse_up as extern "C" fn(&Object, Sel, id),
             );
         }
 
@@ -408,6 +277,27 @@ fn should_pass_through_key(key_code: u16, modifier_flags: u64) -> bool {
     false
 }
 
+// ---------------- MOUSE EVENT TAP ----------------
+
+fn is_mouse_in_window(mouse_x: f64, mouse_y: f64) -> bool {
+    if let Ok(guard) = WINDOW_FRAME.lock() {
+        let (x, y, w, h) = *guard;
+        if w > 0.0 && h > 0.0 {
+            return mouse_x >= x && mouse_x <= x + w && mouse_y >= y && mouse_y <= y + h;
+        }
+    }
+    false
+}
+
+fn update_window_frame(window: id) {
+    unsafe {
+        let frame: NSRect = msg_send![window, frame];
+        if let Ok(mut guard) = WINDOW_FRAME.lock() {
+            *guard = (frame.origin.x, frame.origin.y, frame.size.width, frame.size.height);
+        }
+    }
+}
+
 // ---------------- MAIN ----------------
 
 fn main() {
@@ -416,7 +306,6 @@ fn main() {
 
         // Register all custom classes
         register_non_activating_panel_class();
-        register_focusless_button_class();
         register_button_handler_class();
         register_draggable_view_class();
         register_focusless_text_field_class();
@@ -429,7 +318,6 @@ fn main() {
         let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
         let notification_center: id = msg_send![workspace, notificationCenter];
         
-        // NSWorkspaceActiveSpaceDidChangeNotification
         let notification_name = NSString::alloc(nil).init_str("NSWorkspaceActiveSpaceDidChangeNotification");
         let _: () = msg_send![notification_center, 
             addObserver:space_handler 
@@ -447,7 +335,7 @@ fn main() {
             NSSize::new(400.0, 300.0),
         );
 
-        // Use NonActivatingPanel - like WS_EX_NOACTIVATE on Windows
+        // Use NonActivatingPanel
         let panel_class = Class::get("NonActivatingPanel").unwrap();
         let window: id = msg_send![panel_class, alloc];
         let window: id = msg_send![window,
@@ -488,8 +376,8 @@ fn main() {
         let handler_class = Class::get("ButtonHandler").unwrap();
         let handler: id = msg_send![handler_class, new];
 
-        // Use FocuslessButton for both buttons
-        let button_class = Class::get("FocuslessButton").unwrap();
+        // Use regular NSButton (simpler, more stable)
+        let button_class = Class::get("NSButton").unwrap();
 
         // Close button
         let close_button: id = msg_send![button_class, alloc];
@@ -501,7 +389,6 @@ fn main() {
         let _: () = msg_send![close_button, setTarget: handler];
         let _: () = msg_send![close_button, setAction: sel!(closeButtonClicked:)];
         let _: () = msg_send![close_button, setRefusesFirstResponder: YES];
-        let _: () = msg_send![close_button, setFocusRingType: NSFocusRingTypeNone];
         let _: () = msg_send![draggable_view, addSubview: close_button];
 
         // Test button
@@ -514,7 +401,6 @@ fn main() {
         let _: () = msg_send![test_button, setTarget: handler];
         let _: () = msg_send![test_button, setAction: sel!(testButtonClicked:)];
         let _: () = msg_send![test_button, setRefusesFirstResponder: YES];
-        let _: () = msg_send![test_button, setFocusRingType: NSFocusRingTypeNone];
         let _: () = msg_send![draggable_view, addSubview: test_button];
 
         // Text field
@@ -580,13 +466,13 @@ fn main() {
                 }
             }
 
-            nil // Swallow event
+            nil
         });
         let block = block.copy();
 
         let _monitor: id = msg_send![ns_event_class, addGlobalMonitorForEventsMatchingMask:mask handler:&*block];
 
-        // Local monitor for when panel has focus
+        // Local monitor
         let local_block = block::ConcreteBlock::new(move |event: id| -> id {
             if !TEXT_FIELD_ACTIVE.load(Ordering::SeqCst) {
                 return event;
@@ -632,6 +518,50 @@ fn main() {
 
         let _: () = msg_send![window, center];
         let _: () = msg_send![window, orderFrontRegardless];
+        
+        // Store initial window frame
+        update_window_frame(window);
+
+        // Set up CGEventTap to swallow mouse events over our window
+        // This requires Accessibility permissions
+        let tap_result = CGEventTap::new(
+            CGEventTapLocation::Session,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::Default,
+            vec![CGEventType::LeftMouseDown, CGEventType::LeftMouseUp],
+            |_proxy, _event_type, event| {
+                // Get mouse location from event
+                let location = event.location();
+                
+                // Check if mouse is in our window
+                if is_mouse_in_window(location.x, location.y) {
+                    println!("Mouse event swallowed at ({}, {})", location.x, location.y);
+                    // Return None to swallow the event
+                    return None;
+                }
+                
+                // Pass through
+                Some(event)
+            },
+        );
+        
+        match tap_result {
+            Ok(tap) => {
+                let source = tap.mach_port.create_runloop_source(0);
+                if let Ok(src) = source {
+                    CFRunLoop::get_current().add_source(&src, unsafe { kCFRunLoopCommonModes });
+                    tap.enable();
+                    println!("Mouse event tap installed successfully!");
+                    // Keep the tap alive
+                    std::mem::forget(tap);
+                }
+            }
+            Err(()) => {
+                println!("Failed to create mouse event tap - check Accessibility permissions");
+            }
+        }
+
+        println!("App started - window should be visible");
 
         app.run();
     }
