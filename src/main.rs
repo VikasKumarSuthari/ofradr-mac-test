@@ -434,7 +434,17 @@ fn main() {
         let _monitor: id = msg_send![ns_event_class, addGlobalMonitorForEventsMatchingMask:mask handler:&*block];
 
         let _: () = msg_send![window, center];
+        let _: () = msg_send![window, makeKeyAndOrderFront: nil];
         let _: () = msg_send![window, orderFrontRegardless];
+        let _: () = msg_send![window, display]; // Force redraw
+
+        // Log exact window frame
+        let frame: NSRect = msg_send![window, frame];
+        log_to_file(&format!("Window Frame: x={}, y={}, w={}, h={}", 
+            frame.origin.x, frame.origin.y, frame.size.width, frame.size.height));
+            
+        let is_visible: i8 = msg_send![window, isVisible];
+        log_to_file(&format!("Window isVisible reported: {}", is_visible));
 
         log_to_file("App started with window visible");
         
@@ -466,8 +476,20 @@ fn main() {
                         
                         if list_result == 0 && count_out > 0 {
                             // The list is ordered front-to-back.
-                            // If we are not first, we need to order above the first window!
                             let top_window = window_list[0];
+                            
+                            // Check if WE are in the list!
+                            let mut found_me = false;
+                            for i in 0..(count_out as usize) {
+                                if window_list[i] == win_num {
+                                    found_me = true;
+                                    break;
+                                }
+                            }
+                            
+                            if count % 10 == 0 {
+                                log_to_file(&format!("OnScreen check: Found me? {} | Top window: {}", found_me, top_window));
+                            }
                             if top_window != win_num {
                                 // Order explicitly above the top window
                                 let order_res = CGSOrderWindow(cgs_connection, win_num, 1, top_window);
