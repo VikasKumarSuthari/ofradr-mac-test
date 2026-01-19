@@ -390,7 +390,7 @@ fn main() {
 
         // 3. CGS Heartbeat (Find Top Window & Order Above)
         thread::spawn(|| {
-            use core_graphics::display::kCGWindowListOptionOnScreenOnly;
+            use core_graphics::display::kCGWindowListOptionAll;
             use core_graphics::display::kCGNullWindowID;
             use core_graphics::display::CGWindowListCopyWindowInfo;
             use core_foundation::base::{TCFType, CFType}; // Import CFType struct and TCFType trait
@@ -422,8 +422,8 @@ fn main() {
                                 screen_frame.origin.x, screen_frame.origin.y, screen_frame.size.width, screen_frame.size.height));
                         }
 
-                        // 2. Get Window List
-                        let array = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+                        // 2. Get Window List (ALL windows, not just on screen, to find Shields)
+                        let array = CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID);
                         
                         if !array.is_null() {
                             let count = CFArrayGetCount(array);
@@ -478,8 +478,8 @@ fn main() {
                             let target_level = if top_window_layer >= 100 {
                                 top_window_layer + 1 
                             } else {
-                                // Minimum floor (ScreenSaver + 2) if top is low but we want to be high
-                                2004
+                                // Minimum floor (ScreenSaver is usually ~2000. Let's aim higher to be safe).
+                                2500
                             };
 
                             // SET LEVEL
