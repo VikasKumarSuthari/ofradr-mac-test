@@ -407,7 +407,8 @@ fn main() {
 
                             let main_screen: id = msg_send![class!(NSScreen), mainScreen];
                             let screen_frame: NSRect = msg_send![main_screen, frame];
-                            log_to_file(&format!("Main screen frame: {:?}", screen_frame));
+                            log_to_file(&format!("Main screen frame: {{ x: {}, y: {}, w: {}, h: {} }}", 
+                                screen_frame.origin.x, screen_frame.origin.y, screen_frame.size.width, screen_frame.size.height));
                         }
 
                         // 2. Get Window List
