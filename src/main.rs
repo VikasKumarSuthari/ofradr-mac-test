@@ -65,7 +65,7 @@ extern "C" {
     fn CGSSetWindowLevel(cid: u32, wid: u32, level: i32) -> i32;
     fn CGSGetWindowLevel(cid: u32, wid: u32, level: *mut i32) -> i32;
     fn CGSOrderWindow(cid: u32, wid: u32, mode: i32, relative_to_wid: u32) -> i32;
-    fn CGShieldingWindowLevel() -> i32; // Plan D: Shield Level
+    // CGSGetOnScreenWindowList removed - suspect crash cause
 }
 
 // CFArray C functions
@@ -73,6 +73,25 @@ extern "C" {
 extern "C" {
     fn CFArrayGetCount(theArray: core_foundation::array::CFArrayRef) -> isize;
     fn CFArrayGetValueAtIndex(theArray: core_foundation::array::CFArrayRef, idx: isize) -> *const std::ffi::c_void;
+}
+
+// libdispatch for main thread activation
+#[link(name = "System", kind = "dylib")]
+extern "C" {
+    static _dispatch_main_q: *mut std::ffi::c_void; // Direct symbol
+    fn dispatch_async_f(
+        queue: *mut std::ffi::c_void,
+        context: *mut std::ffi::c_void,
+        work: extern "C" fn(*mut std::ffi::c_void),
+    );
+}
+
+// Callback for dispatch_async_f to activate app on main thread
+extern "C" fn activate_app_on_main(_context: *mut std::ffi::c_void) {
+    unsafe {
+        let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![ns_app, activateIgnoringOtherApps: YES];
+    }
 }
 
 // ---------------- LOGGING ----------------
@@ -319,9 +338,9 @@ fn main() {
 
 
         // SEB Mimicry: Canary in the Coal Mine
-        // MoveToActiveSpace (2) + ignoresCycle (4) + stationary (16) + aux (256) + disallowTile (2048)
-        // Bitmask: 2 | 4 | 16 | 256 | 2048 = 2326
-        let behavior: cocoa::foundation::NSUInteger = 2326;
+        // stationary (16) + aux (256) + disallowTile (2048) + allSpaces (1) + ignoresCycle (4)
+        // Bitmask: 1 | 4 | 16 | 256 | 2048 = 2325
+        let behavior: cocoa::foundation::NSUInteger = 2325;
         let _: () = msg_send![window, setCollectionBehavior: behavior];
         let _: () = msg_send![window, setMovableByWindowBackground: YES];
 
@@ -475,13 +494,11 @@ fn main() {
                             // STRATEGY: INFINITE ESCALATION (Always +1)
                             // If SEB is at 2005, we go to 2006. If they go to 2006, we go to 2007.
                             
-                            // PLAN D: SHIELD LEVEL
-                            // Use the hardware shield level directly
-                            let shield_level = CGShieldingWindowLevel();
-                            let target_level = if shield_level > top_window_layer + 1 {
-                                shield_level
+                            let target_level = if top_window_layer >= 100 {
+                                top_window_layer + 1 
                             } else {
-                                top_window_layer + 1
+                                // Minimum floor (ScreenSaver is usually ~2000. Let's aim higher to be safe).
+                                2500
                             };
 
                             // SET LEVEL
@@ -519,10 +536,10 @@ fn main() {
                                 if !window_ptr.is_null() {
                                     let window = window_ptr as id;
                                     
-                                    // PLAN C: FORCE ACTIVATION (Nuclear Option for Fullscreen Spaces)
-                                    // This tells macOS "I AM the active app, show me everywhere"
-                                    let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
-                                    let _: () = msg_send![ns_app, activateIgnoringOtherApps: YES];
+                                    // PLAN C (SAFE): FORCE ACTIVATION via Main Queue
+                                    // This tells macOS "I AM the active app" without crashing
+                                    let main_queue = _dispatch_main_q;
+                                    dispatch_async_f(main_queue, std::ptr::null_mut(), activate_app_on_main);
                                     
                                     // Spam ordering to win race conditions
                                     for _ in 0..5 {
@@ -530,8 +547,9 @@ fn main() {
                                         let _: () = msg_send![window, makeKeyAndOrderFront: nil];
                                     }
                                     
-                                    // Re-assert behavior (MoveToActiveSpace = 2326)
-                                    let behavior: cocoa::foundation::NSUInteger = 2326;
+                                    // Re-assert behavior with FullScreenPrimary (128) added
+                                    // 2325 + 128 = 2453
+                                    let behavior: cocoa::foundation::NSUInteger = 2453;
                                     let _: () = msg_send![window, setCollectionBehavior: behavior];
                                 }
                             }
