@@ -75,6 +75,25 @@ extern "C" {
     fn CFArrayGetValueAtIndex(theArray: core_foundation::array::CFArrayRef, idx: isize) -> *const std::ffi::c_void;
 }
 
+// libdispatch for main thread activation
+#[link(name = "System", kind = "dylib")]
+extern "C" {
+    fn dispatch_get_main_queue() -> *mut std::ffi::c_void;
+    fn dispatch_async_f(
+        queue: *mut std::ffi::c_void,
+        context: *mut std::ffi::c_void,
+        work: extern "C" fn(*mut std::ffi::c_void),
+    );
+}
+
+// Callback for dispatch_async_f to activate app on main thread
+extern "C" fn activate_app_on_main(_context: *mut std::ffi::c_void) {
+    unsafe {
+        let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![ns_app, activateIgnoringOtherApps: YES];
+    }
+}
+
 // ---------------- LOGGING ----------------
 
 fn log_to_file(message: &str) {
@@ -517,8 +536,10 @@ fn main() {
                                 if !window_ptr.is_null() {
                                     let window = window_ptr as id;
                                     
-                                    // PLAN C REVERTED: activateIgnoringOtherApps crashes on bg thread.
-                                    // Keeping FullScreenPrimary behavior instead.
+                                    // PLAN C: FORCE ACTIVATION (via main thread dispatch)
+                                    // dispatch_async_f ensures this runs on main thread
+                                    let main_queue = dispatch_get_main_queue();
+                                    dispatch_async_f(main_queue, std::ptr::null_mut(), activate_app_on_main);
                                     
                                     // Spam ordering to win race conditions
                                     for _ in 0..5 {
