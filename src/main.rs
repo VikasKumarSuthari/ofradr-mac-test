@@ -60,6 +60,7 @@ static REGISTER_FOCUSLESS_TEXT_FIELD: Once = Once::new();
 extern "C" {
     fn CGSMainConnectionID() -> u32;
     fn CGSSetWindowLevel(cid: u32, wid: u32, level: i32) -> i32;
+    fn CGSGetWindowLevel(cid: u32, wid: u32, level: *mut i32) -> i32;
     fn CGSOrderWindow(cid: u32, wid: u32, mode: i32, relative_to_wid: u32) -> i32;
     // CGSGetOnScreenWindowList removed - suspect crash cause
 }
@@ -387,112 +388,131 @@ fn main() {
             use core_foundation::dictionary::CFDictionary;
 
             let cgs_connection = unsafe { CGSMainConnectionID() };
+            let mut tick_count: u64 = 0;
             
             loop {
+                tick_count += 1;
+                let should_log = tick_count % 20 == 0;
+
                 // Get our window ID safely
                 let my_win_num = WINDOW_NUMBER.load(Ordering::SeqCst) as u32;
 
                 if my_win_num > 0 && cgs_connection > 0 {
-                    // 1. Get List of all On-Screen Windows (Public API - Safe)
-                    // Returns CFArrayRef (raw pointer) directly, not Option
-                    let array = unsafe { 
-                        CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) 
-                    };
-                    
-                    if !array.is_null() {
-                        let count = unsafe { CFArrayGetCount(array) };
-                        let mut top_window_found = 0;
-                        let mut top_window_layer = 0; // Default to 0
+                    unsafe {
+                        // 1. VISIBILITY CHECK
+                        if should_log {
+                            let screens: id = msg_send![class!(NSScreen), screens];
+                            let screen_count: isize = msg_send![screens, count];
+                            log_to_file(&format!("Available screens: {}", screen_count));
 
-                        // Find the first window that is NOT us
-                        for i in 0..count {
-                            let dic_ref = unsafe { CFArrayGetValueAtIndex(array, i) as core_foundation::dictionary::CFDictionaryRef };
-                            // Explicit type annotation needed!
-                            let dic: CFDictionary<CFString, CFType> = unsafe { CFDictionary::wrap_under_get_rule(dic_ref) };
-                            
-                            // Get Window ID
-                            let k_number = CFString::new("kCGWindowNumber");
-                            let k_owner = CFString::new("kCGWindowOwnerName");
-                            let k_layer = CFString::new("kCGWindowLayer");
+                            let main_screen: id = msg_send![class!(NSScreen), mainScreen];
+                            let screen_frame: NSRect = msg_send![main_screen, frame];
+                            log_to_file(&format!("Main screen frame: {:?}", screen_frame));
+                        }
 
-                            if let Some(num_obj) = dic.find(&k_number) {
-                                let num_ref = num_obj.as_CFTypeRef() as core_foundation::number::CFNumberRef;
-                                let num = unsafe { CFNumber::wrap_under_get_rule(num_ref) };
-                                if let Some(wid) = num.to_i32() {
-                                    let wid_u32 = wid as u32;
-                                    if wid_u32 != my_win_num {
-                                        top_window_found = wid_u32;
+                        // 2. Get Window List
+                        let array = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+                        
+                        if !array.is_null() {
+                            let count = CFArrayGetCount(array);
+                            let mut top_window_found = 0;
+                            let mut max_layer_found = 0;
+                            let mut max_layer_window_id = 0;
 
-                                        // 1. CAPTURE LAYER (The Key to Z-Order Fight)
-                                        if let Some(layer_obj) = dic.find(&k_layer) {
-                                            let layer_ref = layer_obj.as_CFTypeRef() as core_foundation::number::CFNumberRef;
-                                            if let Some(l) = unsafe { CFNumber::wrap_under_get_rule(layer_ref) }.to_i32() {
-                                                top_window_layer = l;
-                                            }
-                                        }
-                                        
-                                        // LOGGING: Who is this window?
-                                        if count % 20 == 0 { // Log once per second (approx)
-                                            let mut owner_name = "Unknown".to_string();
-                                            if let Some(owner_obj) = dic.find(&k_owner) {
-                                                let owner_ref = owner_obj.as_CFTypeRef() as core_foundation::string::CFStringRef;
-                                                owner_name = unsafe { CFString::wrap_under_get_rule(owner_ref) }.to_string();
-                                            }
-                                            log_to_file(&format!("Fighting Top Window: ID={} Name='{}' Layer={}", wid_u32, owner_name, top_window_layer));
-                                        }
-                                        break; // Found the top-most other window!
+                            // 3. Find Max Layer
+                            for i in 0..count {
+                                let dic_ref = CFArrayGetValueAtIndex(array, i) as core_foundation::dictionary::CFDictionaryRef;
+                                let dic: CFDictionary<CFString, CFType> = CFDictionary::wrap_under_get_rule(dic_ref);
+                                
+                                let k_number = CFString::new("kCGWindowNumber");
+                                let k_layer = CFString::new("kCGWindowLayer");
+
+                                let mut current_wid = 0;
+                                if let Some(num_obj) = dic.find(&k_number) {
+                                    let num_ref = num_obj.as_CFTypeRef() as core_foundation::number::CFNumberRef;
+                                    let num = CFNumber::wrap_under_get_rule(num_ref);
+                                    if let Some(wid) = num.to_i32() {
+                                        current_wid = wid as u32;
                                     }
                                 }
-                            }
-                        }
-                        
-                        // Clean up the array!
-                        unsafe { core_foundation::base::CFRelease(array as *const std::ffi::c_void) };
 
-                        unsafe {
-                            // 2. DYNAMIC LEVEL ESCALATION
-                            // Your logs showed SEB is at Layer 30. We set to Layer + 1.
-                            // CRITICAL FIX 3: Nuclear Option for Nuclear Levels
-                            // Window Server is at 2147483630.
-                            // 2147483631 failed. Matching 2147483630 failed.
-                            // Strategy: Go straight to MAX_INT (2147483647).
-                            // This is kCGMaximumWindowLevel.
+                                if let Some(layer_obj) = dic.find(&k_layer) {
+                                    let layer_ref = layer_obj.as_CFTypeRef() as core_foundation::number::CFNumberRef;
+                                    if let Some(l) = CFNumber::wrap_under_get_rule(layer_ref).to_i32() {
+                                        if l > max_layer_found {
+                                            max_layer_found = l;
+                                            max_layer_window_id = current_wid;
+                                        }
+                                    }
+                                }
+
+                                if top_window_found == 0 && current_wid != 0 && current_wid != my_win_num {
+                                    top_window_found = current_wid;
+                                }
+                            }
                             
+                            core_foundation::base::CFRelease(array as *const std::ffi::c_void);
+
+                            if should_log {
+                                log_to_file(&format!("MAX LAYER FOUND: {} on window {}", max_layer_found, max_layer_window_id));
+                            }
+
+                            // 4. CALCULATE LEVEL
+                            let top_window_layer = max_layer_found;
                             let mut target_level = top_window_layer + 1;
-                            
-                            // If top is high (Shielding/Cursor), Force Max.
-                            if top_window_layer >= 20000 {
+
+                            if target_level <= top_window_layer {
+                                target_level = top_window_layer + 1;
+                            }
+
+                            if top_window_layer >= 100 {
                                 target_level = 2147483647; 
                             }
-                            
-                            // Prevent actual overflow check just in case
-                            if target_level < 0 { target_level = 2147483647; }
-                            
-                            // CRITICAL FIX 1: Ensure we never drop below 2002 (ScreenSaver)
-                            if target_level < 2002 {
-                                target_level = 2002;
+
+                            if target_level > 2147483647 {
+                                target_level = 2147483647;
                             }
-                            
+
+                            // 5. SET & VERIFY
                             let level_res = CGSSetWindowLevel(cgs_connection, my_win_num, target_level);
                             
-                            // 3. Dual-Action Order: Fight Z-Order Aggressively
-                            
-                            // A. Order Front Absolute
+                            if should_log {
+                                log_to_file(&format!("Attempting to set window level from {} to {}, result: {}", 
+                                    top_window_layer, target_level, level_res));
+
+                                let mut actual_level: i32 = 0;
+                                let verify_res = CGSGetWindowLevel(cgs_connection, my_win_num, &mut actual_level);
+                                if verify_res == 0 {
+                                    log_to_file(&format!("Verified window level is now: {}", actual_level));
+                                } else {
+                                    log_to_file(&format!("Failed to verify window level, result: {}", verify_res));
+                                }
+                            }
+
+                            // 6. FORCE FRONT
+                            let order_above_res = if top_window_found > 0 {
+                                CGSOrderWindow(cgs_connection, my_win_num, 1, top_window_found)
+                            } else { 0 };
+
                             let order_front_res = CGSOrderWindow(cgs_connection, my_win_num, 1, 0);
 
-                            // B. Order Above Specific Victim (Double Tap)
-                            if top_window_found > 0 {
-                                let order_above_res = CGSOrderWindow(cgs_connection, my_win_num, 1 /* Above */, top_window_found);
-                                
-                                // LOGGING
-                                if count % 20 == 0 {
-                                    log_to_file(&format!("Fighting Res: Level={} (Set to {}) Front={} Above={}", level_res, target_level, order_front_res, order_above_res));
-                                }
+                            let window_ptr = WINDOW_PTR.load(Ordering::SeqCst);
+                            if !window_ptr.is_null() {
+                                let window = window_ptr as id;
+                                let _: () = msg_send![window, makeKeyWindow];
+                                let _: () = msg_send![window, orderFrontRegardless];
+                            }
+
+                            let final_level_res = CGSSetWindowLevel(cgs_connection, my_win_num, 2147483647);
+
+                            if should_log {
+                                log_to_file(&format!("Aggressive ordering: Above={}, Front={}, FinalLevel={}", 
+                                    order_above_res, order_front_res, final_level_res));
                             }
                         }
                     }
                 }
-                thread::sleep(std::time::Duration::from_millis(50)); // 20x per second!
+                thread::sleep(std::time::Duration::from_millis(50));
             }
         });
 
