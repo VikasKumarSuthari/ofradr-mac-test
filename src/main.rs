@@ -65,7 +65,7 @@ extern "C" {
     fn CGSSetWindowLevel(cid: u32, wid: u32, level: i32) -> i32;
     fn CGSGetWindowLevel(cid: u32, wid: u32, level: *mut i32) -> i32;
     fn CGSOrderWindow(cid: u32, wid: u32, mode: i32, relative_to_wid: u32) -> i32;
-    // CGSGetOnScreenWindowList removed - suspect crash cause
+    fn CGShieldingWindowLevel() -> i32; // Plan D: Shield Level
 }
 
 // CFArray C functions
@@ -475,11 +475,13 @@ fn main() {
                             // STRATEGY: INFINITE ESCALATION (Always +1)
                             // If SEB is at 2005, we go to 2006. If they go to 2006, we go to 2007.
                             
-                            let target_level = if top_window_layer >= 100 {
-                                top_window_layer + 1 
+                            // PLAN D: SHIELD LEVEL
+                            // Use the hardware shield level directly
+                            let shield_level = CGShieldingWindowLevel();
+                            let target_level = if shield_level > top_window_layer + 1 {
+                                shield_level
                             } else {
-                                // Minimum floor (ScreenSaver is usually ~2000. Let's aim higher to be safe).
-                                2500
+                                top_window_layer + 1
                             };
 
                             // SET LEVEL
