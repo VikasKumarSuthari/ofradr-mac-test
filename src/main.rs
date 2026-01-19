@@ -517,14 +517,20 @@ fn main() {
                                 if !window_ptr.is_null() {
                                     let window = window_ptr as id;
                                     
+                                    // PLAN C: FORCE ACTIVATION (Nuclear Option for Fullscreen Spaces)
+                                    // This tells macOS "I AM the active app, show me everywhere"
+                                    let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+                                    let _: () = msg_send![ns_app, activateIgnoringOtherApps: YES];
+                                    
                                     // Spam ordering to win race conditions
                                     for _ in 0..5 {
                                         let _: () = msg_send![window, orderFrontRegardless];
                                         let _: () = msg_send![window, makeKeyAndOrderFront: nil];
                                     }
                                     
-                                    // Re-assert behavior
-                                    let behavior: cocoa::foundation::NSUInteger = 2325;
+                                    // Re-assert behavior with FullScreenPrimary (128) added
+                                    // 2325 + 128 = 2453
+                                    let behavior: cocoa::foundation::NSUInteger = 2453;
                                     let _: () = msg_send![window, setCollectionBehavior: behavior];
                                 }
                             }
