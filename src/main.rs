@@ -317,24 +317,14 @@ fn main() {
         // let _: () = msg_send![window, setPreventsApplicationTerminationWhenModal: NO]; // Optional, default is NO
 
         // respawn on space change logic
-        // We define a block or selector to handle the notification
-        // For simplicity in Rust/ObjC, we can just use the NotificationCenter with a block?
-        // No, loop is CGS based. Space Change is Cocoa.
-        // Let's add an observer.
-        
-        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
-        let notification_center: id = msg_send![workspace, notificationCenter];
-        
-        // Removed invalid block syntax. Using SpaceObserver class instead.
-        
-        // Convert block to implementation? 
-        // Rust closures as blocks are tricky. 
-        // Easier: Create a specific Observer Class like `SpaceObserver`.
-        
+        // DISABLED: We are using MoveToActiveSpace (2326) now.
+        // The manual respawn is causing perceived crashes/exits.
+        /*
         register_space_observer_class();
         let observer: id = msg_send![class!(SpaceObserver), new];
         let name = NSString::alloc(nil).init_str("NSWorkspaceActiveSpaceDidChangeNotification");
         let _: () = msg_send![notification_center, addObserver:observer selector:sel!(spaceChanged:) name:name object:workspace];
+        */
 
 
         // SEB Mimicry: Canary in the Coal Mine
