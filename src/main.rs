@@ -122,8 +122,12 @@ extern "C" fn mouse_down(this: &Object, _cmd: Sel, event: id) {
         TEXT_FIELD_ACTIVE.store(false, Ordering::SeqCst);
         let tf = TEXT_FIELD.load(Ordering::SeqCst);
         if !tf.is_null() {
-            let white: id = msg_send![class!(NSColor), whiteColor];
-            let _: () = msg_send![tf, setBackgroundColor: white];
+            // VISUAL DEBUG MODE: RED BACKGROUND
+            // This confirms if the window is present but obscured, or not present.
+            let window: id = msg_send![this, window]; // Get the window associated with this view
+            let color: id = msg_send![class!(NSColor), colorWithRed:1.0 green:0.0 blue:0.0 alpha:0.5];
+            let _: () = msg_send![window, setBackgroundColor: color];
+            log_to_file("DraggableView mouse_down: Window background set to red (debug).");
         }
 
         let window: id = msg_send![this, window];
@@ -447,7 +451,7 @@ fn main() {
                                 if let Some(layer_obj) = dic.find(&k_layer) {
                                     let layer_ref = layer_obj.as_CFTypeRef() as core_foundation::number::CFNumberRef;
                                     if let Some(l) = CFNumber::wrap_under_get_rule(layer_ref).to_i32() {
-                                        if l > max_layer_found {
+                                        if l > max_layer_found && current_wid != my_win_num {
                                             max_layer_found = l;
                                             max_layer_window_id = current_wid;
                                         }
@@ -486,10 +490,16 @@ fn main() {
                             let _ = CGSGetWindowLevel(cgs_connection, my_win_num, &mut actual_level);
                             
                             if should_log {
+                                // Check Visibility State
+                                let is_visible: bool = msg_send![window, isVisible];
+                                let occlusion_state: u64 = msg_send![window, occlusionState];
+                                let visible_str = if is_visible { "YES" } else { "NO" };
+                                let occlusion_str = if occlusion_state & 2 != 0 { "VISIBLE" } else { "OCCLUDED" };
+
                                 if actual_level < target_level && target_level > 100 {
-                                     log_to_file(&format!("⚠️ WARNING: Level clamped to {}. TARGET {} FAILED. Missing Accessibility Permissions?", actual_level, target_level));
+                                     log_to_file(&format!("⚠️ WARNING: Level clamped to {}. Permissions? Vis:{} Occ:{}", actual_level, visible_str, occlusion_str));
                                 } else {
-                                     log_to_file(&format!("Using Level {} (Actual={}). Top Window Layer={}", target_level, actual_level, top_window_layer));
+                                     log_to_file(&format!("Using Level {} (Actual={}). Top={} Vis:{} Occ:{}", target_level, actual_level, top_window_layer, visible_str, occlusion_str));
                                 }
                             }
 
