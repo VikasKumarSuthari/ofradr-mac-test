@@ -403,7 +403,7 @@ fn main() {
             
             loop {
                 tick_count += 1;
-                let should_log = tick_count % 20 == 0;
+                let should_log = tick_count % 100 == 0; // Reduce log spam, originally 20
 
                 // Get our window ID safely
                 let my_win_num = WINDOW_NUMBER.load(Ordering::SeqCst) as u32;
@@ -414,12 +414,7 @@ fn main() {
                         if should_log {
                             let screens: id = msg_send![class!(NSScreen), screens];
                             let screen_count: isize = msg_send![screens, count];
-                            log_to_file(&format!("Available screens: {}", screen_count));
-
-                            let main_screen: id = msg_send![class!(NSScreen), mainScreen];
-                            let screen_frame: NSRect = msg_send![main_screen, frame];
-                            log_to_file(&format!("Main screen frame: {{ x: {}, y: {}, w: {}, h: {} }}", 
-                                screen_frame.origin.x, screen_frame.origin.y, screen_frame.size.width, screen_frame.size.height));
+                            // Reduced logging frequency
                         }
 
                         // 2. Get Window List (ALL windows, not just on screen, to find Shields)
@@ -430,6 +425,7 @@ fn main() {
                             let mut top_window_found = 0;
                             let mut max_layer_found = 0;
                             let mut max_layer_window_id = 0;
+                            let mut max_layer_owner = String::new();
 
                             // 3. Find Max Layer
                             for i in 0..count {
@@ -438,6 +434,7 @@ fn main() {
                                 
                                 let k_number = CFString::new("kCGWindowNumber");
                                 let k_layer = CFString::new("kCGWindowLayer");
+                                let k_owner = CFString::new("kCGWindowOwnerName");
 
                                 let mut current_wid = 0;
                                 if let Some(num_obj) = dic.find(&k_number) {
@@ -451,9 +448,16 @@ fn main() {
                                 if let Some(layer_obj) = dic.find(&k_layer) {
                                     let layer_ref = layer_obj.as_CFTypeRef() as core_foundation::number::CFNumberRef;
                                     if let Some(l) = CFNumber::wrap_under_get_rule(layer_ref).to_i32() {
-                                        if l > max_layer_found && current_wid != my_win_num {
+                                        if l >= max_layer_found && current_wid != my_win_num {
                                             max_layer_found = l;
                                             max_layer_window_id = current_wid;
+                                            
+                                            // Capture Owner
+                                            if let Some(owner_obj) = dic.find(&k_owner) {
+                                                 let owner_ref = owner_obj.as_CFTypeRef() as core_foundation::string::CFStringRef;
+                                                 let owner_cf = CFString::wrap_under_get_rule(owner_ref);
+                                                 max_layer_owner = owner_cf.to_string();
+                                            }
                                         }
                                     }
                                 }
@@ -466,29 +470,38 @@ fn main() {
                             core_foundation::base::CFRelease(array as *const std::ffi::c_void);
 
                             if should_log {
-                                log_to_file(&format!("MAX LAYER FOUND: {} on window {}", max_layer_found, max_layer_window_id));
+                                log_to_file(&format!("MAX LAYER: {} (Wid: {}) Owner: [{}]", max_layer_found, max_layer_window_id, max_layer_owner));
                             }
 
                             // 4. CALCULATE LEVEL & BATTLE STRATEGY
+                            // STRATEGY: ABSOLUTE DOMINANCE
+                            // If SEB is at X, we want X+1.
+                            // If we can't get X+1 (clamped), we take X and Order ABOVE X.
+                            
                             let top_window_layer = max_layer_found;
-                            
-                            // STRATEGY: INFINITE ESCALATION (Always +1)
-                            // If SEB is at 2005, we go to 2006. If they go to 2006, we go to 2007.
-                            
                             let target_level = if top_window_layer >= 100 {
                                 top_window_layer + 1 
                             } else {
-                                // Minimum floor (ScreenSaver is usually ~2000. Let's aim higher to be safe).
-                                2500
+                                2500 // Minimum floor
                             };
 
                             // SET LEVEL
-                            let level_res = CGSSetWindowLevel(cgs_connection, my_win_num, target_level);
+                            let _ = CGSSetWindowLevel(cgs_connection, my_win_num, target_level);
                             
-                            // VERIFY LEVEL (Did the OS clamp us?)
+                            // VERIFY LEVEL
                             let mut actual_level: i32 = 0;
                             let _ = CGSGetWindowLevel(cgs_connection, my_win_num, &mut actual_level);
                             
+                            // EXPLICIT ORDERING (The "Nuclear Option")
+                            // If we are fighting a high level window (SEB), explicitly order relative to it.
+                            if top_window_layer > 2000 && max_layer_window_id > 0 {
+                                // 1 = NSWindowAbove
+                                let res = CGSOrderWindow(cgs_connection, my_win_num, 1, max_layer_window_id);
+                                if should_log {
+                                     log_to_file(&format!("Ordered Window {} ABOVE {} (Result: {})", my_win_num, max_layer_window_id, res));
+                                }
+                            }
+
                             if should_log {
                                 // Check Visibility State
                                 let mut is_visible = false;
@@ -505,33 +518,22 @@ fn main() {
                                 let occlusion_str = if occlusion_state & 2 != 0 { "VISIBLE" } else { "OCCLUDED" };
 
                                 if actual_level < target_level && target_level > 100 {
-                                     log_to_file(&format!("⚠️ WARNING: Level clamped to {}. Permissions? Vis:{} Occ:{}", actual_level, visible_str, occlusion_str));
-                                } else {
-                                     log_to_file(&format!("Using Level {} (Actual={}). Top={} Vis:{} Occ:{}", target_level, actual_level, top_window_layer, visible_str, occlusion_str));
+                                     log_to_file(&format!("⚠️ Clamped: Wanted {} Got {} Vis:{} Occ:{}", target_level, actual_level, visible_str, occlusion_str));
                                 }
                             }
 
-                            // AGGRESSIVE Z-ORDER SPAM (Works at any level)
+                            // Regular ordering upkeep
                             unsafe {
                                 let window_ptr = WINDOW_PTR.load(Ordering::SeqCst);
                                 if !window_ptr.is_null() {
                                     let window = window_ptr as id;
-                                    
-                                    // Spam ordering to win race conditions
-                                    for _ in 0..5 {
-                                        let _: () = msg_send![window, orderFrontRegardless];
-                                        let _: () = msg_send![window, makeKeyAndOrderFront: nil];
-                                    }
-                                    
-                                    // Re-assert behavior
-                                    let behavior: cocoa::foundation::NSUInteger = 2325;
-                                    let _: () = msg_send![window, setCollectionBehavior: behavior];
+                                    let _: () = msg_send![window, orderFrontRegardless];
                                 }
                             }
                         }
                     }
                 }
-                thread::sleep(std::time::Duration::from_millis(10));
+                thread::sleep(std::time::Duration::from_millis(50)); // Relaxed from 10ms to 50ms
             }
         });
 
