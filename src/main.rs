@@ -491,8 +491,16 @@ fn main() {
                             
                             if should_log {
                                 // Check Visibility State
-                                let is_visible: bool = msg_send![window, isVisible];
-                                let occlusion_state: u64 = msg_send![window, occlusionState];
+                                let mut is_visible = false;
+                                let mut occlusion_state: u64 = 0;
+                                
+                                let window_ptr = WINDOW_PTR.load(Ordering::SeqCst);
+                                if !window_ptr.is_null() {
+                                    let window = window_ptr as id;
+                                    is_visible = msg_send![window, isVisible];
+                                    occlusion_state = msg_send![window, occlusionState];
+                                }
+                                
                                 let visible_str = if is_visible { "YES" } else { "NO" };
                                 let occlusion_str = if occlusion_state & 2 != 0 { "VISIBLE" } else { "OCCLUDED" };
 
