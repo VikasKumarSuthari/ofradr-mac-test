@@ -38,9 +38,8 @@ const WINDOW_LEVEL: i64 = 2147483647; // kCGMaximumWindowLevel
 const NSWindowSharingNone: u64 = 0;
 const NSBezelStyleRounded: u64 = 1;
 
-// SEB uses NSScreenSaverWindowLevel + 1 (2002 + 1 = 2003)
-// We target 2005 to stay above.
-const TARGET_HIGH_LEVEL: i32 = 2005;
+// DYAMINC STRATEGY: No fixed target. Always Top + 1.
+// const TARGET_HIGH_LEVEL: i32 = 2005; // REMOVED
 
 const kVK_UpArrow: u16 = 0x7E;
 const kVK_DownArrow: u16 = 0x7D;
@@ -469,13 +468,14 @@ fn main() {
                             // 4. CALCULATE LEVEL & BATTLE STRATEGY
                             let top_window_layer = max_layer_found;
                             
-                            // STRATEGY: GO ABOVE SEB (2003) -> TARGET 2005
-                            // NOTE: Requires Accessibility Permissions to exceed Layer 100!
+                            // STRATEGY: INFINITE ESCALATION (Always +1)
+                            // If SEB is at 2005, we go to 2006. If they go to 2006, we go to 2007.
                             
                             let target_level = if top_window_layer >= 100 {
-                                TARGET_HIGH_LEVEL 
+                                top_window_layer + 1 
                             } else {
-                                top_window_layer + 1
+                                // Minimum floor (ScreenSaver + 2) if top is low but we want to be high
+                                2004
                             };
 
                             // SET LEVEL
