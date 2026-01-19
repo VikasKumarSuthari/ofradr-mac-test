@@ -528,9 +528,8 @@ fn main() {
                                         let _: () = msg_send![window, makeKeyAndOrderFront: nil];
                                     }
                                     
-                                    // Re-assert behavior with FullScreenPrimary (128) added
-                                    // 2325 + 128 = 2453
-                                    let behavior: cocoa::foundation::NSUInteger = 2453;
+                                    // Re-assert behavior (Reverted to 2325 - pure Aux)
+                                    let behavior: cocoa::foundation::NSUInteger = 2325;
                                     let _: () = msg_send![window, setCollectionBehavior: behavior];
                                 }
                             }
