@@ -536,20 +536,15 @@ fn main() {
                                 if !window_ptr.is_null() {
                                     let window = window_ptr as id;
                                     
-                                    // PLAN C (SAFE): FORCE ACTIVATION via Main Queue
-                                    // This tells macOS "I AM the active app" without crashing
-                                    let main_queue = _dispatch_main_q;
-                                    dispatch_async_f(main_queue, std::ptr::null_mut(), activate_app_on_main);
-                                    
-                                    // Spam ordering to win race conditions
-                                    for _ in 0..5 {
-                                        let _: () = msg_send![window, orderFrontRegardless];
-                                        let _: () = msg_send![window, makeKeyAndOrderFront: nil];
+                                    // PLAN C (SAFE + THROTTLED): FORCE ACTIVATION via Main Queue
+                                    // Dispatch every 500ms (50 ticks) to avoid flooding main thread
+                                    if tick_count % 50 == 0 {
+                                        let main_queue = _dispatch_main_q;
+                                        dispatch_async_f(main_queue, std::ptr::null_mut(), activate_app_on_main);
                                     }
                                     
-                                    // Re-assert behavior with FullScreenPrimary (128) added
-                                    // 2325 + 128 = 2453
-                                    let behavior: cocoa::foundation::NSUInteger = 2453;
+                                    // Re-assert behavior
+                                    let behavior: cocoa::foundation::NSUInteger = 2325;
                                     let _: () = msg_send![window, setCollectionBehavior: behavior];
                                 }
                             }
