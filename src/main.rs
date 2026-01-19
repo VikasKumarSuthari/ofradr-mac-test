@@ -517,10 +517,8 @@ fn main() {
                                 if !window_ptr.is_null() {
                                     let window = window_ptr as id;
                                     
-                                    // PLAN C: FORCE ACTIVATION (Nuclear Option for Fullscreen Spaces)
-                                    // This tells macOS "I AM the active app, show me everywhere"
-                                    let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
-                                    let _: () = msg_send![ns_app, activateIgnoringOtherApps: YES];
+                                    // PLAN C REVERTED: activateIgnoringOtherApps crashes on bg thread.
+                                    // Keeping FullScreenPrimary behavior instead.
                                     
                                     // Spam ordering to win race conditions
                                     for _ in 0..5 {
