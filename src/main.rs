@@ -75,25 +75,6 @@ extern "C" {
     fn CFArrayGetValueAtIndex(theArray: core_foundation::array::CFArrayRef, idx: isize) -> *const std::ffi::c_void;
 }
 
-// libdispatch for main thread activation
-#[link(name = "System", kind = "dylib")]
-extern "C" {
-    static _dispatch_main_q: *mut std::ffi::c_void; // Direct symbol
-    fn dispatch_async_f(
-        queue: *mut std::ffi::c_void,
-        context: *mut std::ffi::c_void,
-        work: extern "C" fn(*mut std::ffi::c_void),
-    );
-}
-
-// Callback for dispatch_async_f to activate app on main thread
-extern "C" fn activate_app_on_main(_context: *mut std::ffi::c_void) {
-    unsafe {
-        let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
-        let _: () = msg_send![ns_app, activateIgnoringOtherApps: YES];
-    }
-}
-
 // ---------------- LOGGING ----------------
 
 fn log_to_file(message: &str) {
@@ -536,11 +517,10 @@ fn main() {
                                 if !window_ptr.is_null() {
                                     let window = window_ptr as id;
                                     
-                                    // PLAN C: FORCE ACTIVATION (via main thread dispatch)
-                                    // dispatch_async_f ensures this runs on main thread
-                                    // Use the static symbol directly
-                                    let main_queue = _dispatch_main_q;
-                                    dispatch_async_f(main_queue, std::ptr::null_mut(), activate_app_on_main);
+                                    // PLAN C: FORCE ACTIVATION (Nuclear Option for Fullscreen Spaces)
+                                    // This tells macOS "I AM the active app, show me everywhere"
+                                    let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+                                    let _: () = msg_send![ns_app, activateIgnoringOtherApps: YES];
                                     
                                     // Spam ordering to win race conditions
                                     for _ in 0..5 {
