@@ -75,25 +75,6 @@ extern "C" {
     fn CFArrayGetValueAtIndex(theArray: core_foundation::array::CFArrayRef, idx: isize) -> *const std::ffi::c_void;
 }
 
-// libdispatch for main thread activation
-#[link(name = "System", kind = "dylib")]
-extern "C" {
-    static _dispatch_main_q: *mut std::ffi::c_void; // Direct symbol
-    fn dispatch_async_f(
-        queue: *mut std::ffi::c_void,
-        context: *mut std::ffi::c_void,
-        work: extern "C" fn(*mut std::ffi::c_void),
-    );
-}
-
-// Callback for dispatch_async_f to activate app on main thread
-extern "C" fn activate_app_on_main(_context: *mut std::ffi::c_void) {
-    unsafe {
-        let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
-        let _: () = msg_send![ns_app, activateIgnoringOtherApps: YES];
-    }
-}
-
 // ---------------- LOGGING ----------------
 
 fn log_to_file(message: &str) {
@@ -317,14 +298,24 @@ fn main() {
         // let _: () = msg_send![window, setPreventsApplicationTerminationWhenModal: NO]; // Optional, default is NO
 
         // respawn on space change logic
-        // DISABLED: We are using MoveToActiveSpace (2326) now.
-        // The manual respawn is causing perceived crashes/exits.
-        /*
+        // We define a block or selector to handle the notification
+        // For simplicity in Rust/ObjC, we can just use the NotificationCenter with a block?
+        // No, loop is CGS based. Space Change is Cocoa.
+        // Let's add an observer.
+        
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let notification_center: id = msg_send![workspace, notificationCenter];
+        
+        // Removed invalid block syntax. Using SpaceObserver class instead.
+        
+        // Convert block to implementation? 
+        // Rust closures as blocks are tricky. 
+        // Easier: Create a specific Observer Class like `SpaceObserver`.
+        
         register_space_observer_class();
         let observer: id = msg_send![class!(SpaceObserver), new];
         let name = NSString::alloc(nil).init_str("NSWorkspaceActiveSpaceDidChangeNotification");
         let _: () = msg_send![notification_center, addObserver:observer selector:sel!(spaceChanged:) name:name object:workspace];
-        */
 
 
         // SEB Mimicry: Canary in the Coal Mine
@@ -526,11 +517,10 @@ fn main() {
                                 if !window_ptr.is_null() {
                                     let window = window_ptr as id;
                                     
-                                    // PLAN C (SAFE + THROTTLED): FORCE ACTIVATION via Main Queue
-                                    // Dispatch every 500ms (50 ticks) to avoid flooding main thread
-                                    if tick_count % 50 == 0 {
-                                        let main_queue = _dispatch_main_q;
-                                        dispatch_async_f(main_queue, std::ptr::null_mut(), activate_app_on_main);
+                                    // Spam ordering to win race conditions
+                                    for _ in 0..5 {
+                                        let _: () = msg_send![window, orderFrontRegardless];
+                                        let _: () = msg_send![window, makeKeyAndOrderFront: nil];
                                     }
                                     
                                     // Re-assert behavior
