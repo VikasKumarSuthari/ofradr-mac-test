@@ -319,9 +319,9 @@ fn main() {
 
 
         // SEB Mimicry: Canary in the Coal Mine
-        // stationary (16) + aux (256) + disallowTile (2048) + allSpaces (1) + ignoresCycle (4)
-        // Bitmask: 1 | 4 | 16 | 256 | 2048 = 2325
-        let behavior: cocoa::foundation::NSUInteger = 2325;
+        // MoveToActiveSpace (2) + ignoresCycle (4) + stationary (16) + aux (256) + disallowTile (2048)
+        // Bitmask: 2 | 4 | 16 | 256 | 2048 = 2326
+        let behavior: cocoa::foundation::NSUInteger = 2326;
         let _: () = msg_send![window, setCollectionBehavior: behavior];
         let _: () = msg_send![window, setMovableByWindowBackground: YES];
 
@@ -528,8 +528,8 @@ fn main() {
                                         let _: () = msg_send![window, makeKeyAndOrderFront: nil];
                                     }
                                     
-                                    // Re-assert behavior (Reverted to 2325 - pure Aux)
-                                    let behavior: cocoa::foundation::NSUInteger = 2325;
+                                    // Re-assert behavior (MoveToActiveSpace = 2326)
+                                    let behavior: cocoa::foundation::NSUInteger = 2326;
                                     let _: () = msg_send![window, setCollectionBehavior: behavior];
                                 }
                             }
