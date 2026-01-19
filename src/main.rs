@@ -38,6 +38,10 @@ const WINDOW_LEVEL: i64 = 2147483647; // kCGMaximumWindowLevel
 const NSWindowSharingNone: u64 = 0;
 const NSBezelStyleRounded: u64 = 1;
 
+// SEB uses NSScreenSaverWindowLevel + 1 (2002 + 1 = 2003)
+// We target 2005 to stay above.
+const TARGET_HIGH_LEVEL: i32 = 2005;
+
 const kVK_UpArrow: u16 = 0x7E;
 const kVK_DownArrow: u16 = 0x7D;
 const kVK_LeftArrow: u16 = 0x7B;
@@ -465,42 +469,45 @@ fn main() {
                             // 4. CALCULATE LEVEL & BATTLE STRATEGY
                             let top_window_layer = max_layer_found;
                             
-                            // STRATEGY A: Standard Overlay (Below Cap)
-                            if top_window_layer < 100 {
-                                let mut target_level = top_window_layer + 1;
-                                if target_level < 2002 { target_level = 2002; }
-                                
-                                let level_res = CGSSetWindowLevel(cgs_connection, my_win_num, target_level);
-                                let order_res = CGSOrderWindow(cgs_connection, my_win_num, 1, 0); // Front
-                                
-                                if should_log {
-                                    log_to_file(&format!("Standard Overlay: Set Level {} (Top={}) Result={}", target_level, top_window_layer, level_res));
+                            // STRATEGY: GO ABOVE SEB (2003) -> TARGET 2005
+                            // NOTE: Requires Accessibility Permissions to exceed Layer 100!
+                            
+                            let target_level = if top_window_layer >= 100 {
+                                TARGET_HIGH_LEVEL 
+                            } else {
+                                top_window_layer + 1
+                            };
+
+                            // SET LEVEL
+                            let level_res = CGSSetWindowLevel(cgs_connection, my_win_num, target_level);
+                            
+                            // VERIFY LEVEL (Did the OS clamp us?)
+                            let mut actual_level: i32 = 0;
+                            let _ = CGSGetWindowLevel(cgs_connection, my_win_num, &mut actual_level);
+                            
+                            if should_log {
+                                if actual_level < target_level && target_level > 100 {
+                                     log_to_file(&format!("⚠️ WARNING: Level clamped to {}. TARGET {} FAILED. Missing Accessibility Permissions?", actual_level, target_level));
+                                } else {
+                                     log_to_file(&format!("Using Level {} (Actual={}). Top Window Layer={}", target_level, actual_level, top_window_layer));
                                 }
                             }
-                            // STRATEGY B: LAYER 100 BATTLE (The Nuclear Option)
-                            else {
-                                // 1. Join the party at Layer 100
-                                let level_res = CGSSetWindowLevel(cgs_connection, my_win_num, 100);
-                                
-                                // 2. SPAM Z-ORDER to be the *newest* window at Layer 100
-                                // We do this multiple times to win any race conditions
+
+                            // AGGRESSIVE Z-ORDER SPAM (Works at any level)
+                            unsafe {
                                 let window_ptr = WINDOW_PTR.load(Ordering::SeqCst);
                                 if !window_ptr.is_null() {
                                     let window = window_ptr as id;
                                     
+                                    // Spam ordering to win race conditions
                                     for _ in 0..5 {
                                         let _: () = msg_send![window, orderFrontRegardless];
                                         let _: () = msg_send![window, makeKeyAndOrderFront: nil];
                                     }
                                     
-                                    // 3. Force Collection Behavior again just in case
-                                    // stationary (16) + aux (256) + disallowTile (2048) + allSpaces (1) + ignoresCycle (4)
+                                    // Re-assert behavior
                                     let behavior: cocoa::foundation::NSUInteger = 2325;
                                     let _: () = msg_send![window, setCollectionBehavior: behavior];
-                                }
-                                
-                                if should_log {
-                                    log_to_file(&format!("⚔️ LAYER 100 BATTLE: Spammed orderFrontRegardless at Max Layer 100. Level Res: {}", level_res));
                                 }
                             }
                         }
