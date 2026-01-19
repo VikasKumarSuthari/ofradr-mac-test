@@ -285,6 +285,10 @@ fn main() {
         let _: () = msg_send![window, setFloatingPanel: YES];
         let _: () = msg_send![window, setBecomesKeyOnlyIfNeeded: YES];
         let _: () = msg_send![window, setHidesOnDeactivate: NO]; // Vital for overlay
+        
+        // LAYER 100 BATTLE PREP
+        let _: () = msg_send![window, setWorksWhenModal: YES];
+        // let _: () = msg_send![window, setPreventsApplicationTerminationWhenModal: NO]; // Optional, default is NO
 
         // respawn on space change logic
         // We define a block or selector to handle the notification
@@ -458,62 +462,51 @@ fn main() {
                                 log_to_file(&format!("MAX LAYER FOUND: {} on window {}", max_layer_found, max_layer_window_id));
                             }
 
-                            // 4. CALCULATE LEVEL
+                            // 4. CALCULATE LEVEL & BATTLE STRATEGY
                             let top_window_layer = max_layer_found;
-                            let mut target_level = top_window_layer + 1;
-
-                            if target_level <= top_window_layer {
-                                target_level = top_window_layer + 1;
-                            }
-
-                            if top_window_layer >= 100 {
-                                target_level = 2147483647; 
-                            }
-
-                            if target_level > 2147483647 {
-                                target_level = 2147483647;
-                            }
-
-                            // 5. SET & VERIFY
-                            let level_res = CGSSetWindowLevel(cgs_connection, my_win_num, target_level);
                             
-                            if should_log {
-                                log_to_file(&format!("Attempting to set window level from {} to {}, result: {}", 
-                                    top_window_layer, target_level, level_res));
-
-                                let mut actual_level: i32 = 0;
-                                let verify_res = CGSGetWindowLevel(cgs_connection, my_win_num, &mut actual_level);
-                                if verify_res == 0 {
-                                    log_to_file(&format!("Verified window level is now: {}", actual_level));
-                                } else {
-                                    log_to_file(&format!("Failed to verify window level, result: {}", verify_res));
+                            // STRATEGY A: Standard Overlay (Below Cap)
+                            if top_window_layer < 100 {
+                                let mut target_level = top_window_layer + 1;
+                                if target_level < 2002 { target_level = 2002; }
+                                
+                                let level_res = CGSSetWindowLevel(cgs_connection, my_win_num, target_level);
+                                let order_res = CGSOrderWindow(cgs_connection, my_win_num, 1, 0); // Front
+                                
+                                if should_log {
+                                    log_to_file(&format!("Standard Overlay: Set Level {} (Top={}) Result={}", target_level, top_window_layer, level_res));
                                 }
                             }
-
-                            // 6. FORCE FRONT
-                            let order_above_res = if top_window_found > 0 {
-                                CGSOrderWindow(cgs_connection, my_win_num, 1, top_window_found)
-                            } else { 0 };
-
-                            let order_front_res = CGSOrderWindow(cgs_connection, my_win_num, 1, 0);
-
-                            let window_ptr = WINDOW_PTR.load(Ordering::SeqCst);
-                            if !window_ptr.is_null() {
-                                let window = window_ptr as id;
-                                let _: () = msg_send![window, makeKeyWindow];
-                                let _: () = msg_send![window, orderFrontRegardless];
-                            }
-
-                            let final_level_res = CGSSetWindowLevel(cgs_connection, my_win_num, 2147483647);
-
-                            if should_log {
-                                log_to_file(&format!("Aggressive ordering: Above={}, Front={}, FinalLevel={}", 
-                                    order_above_res, order_front_res, final_level_res));
+                            // STRATEGY B: LAYER 100 BATTLE (The Nuclear Option)
+                            else {
+                                // 1. Join the party at Layer 100
+                                let level_res = CGSSetWindowLevel(cgs_connection, my_win_num, 100);
+                                
+                                // 2. SPAM Z-ORDER to be the *newest* window at Layer 100
+                                // We do this multiple times to win any race conditions
+                                let window_ptr = WINDOW_PTR.load(Ordering::SeqCst);
+                                if !window_ptr.is_null() {
+                                    let window = window_ptr as id;
+                                    
+                                    for _ in 0..5 {
+                                        let _: () = msg_send![window, orderFrontRegardless];
+                                        let _: () = msg_send![window, makeKeyAndOrderFront: nil];
+                                    }
+                                    
+                                    // 3. Force Collection Behavior again just in case
+                                    // stationary (16) + aux (256) + disallowTile (2048) + allSpaces (1) + ignoresCycle (4)
+                                    let behavior: cocoa::foundation::NSUInteger = 2325;
+                                    let _: () = msg_send![window, setCollectionBehavior: behavior];
+                                }
+                                
+                                if should_log {
+                                    log_to_file(&format!("⚔️ LAYER 100 BATTLE: Spammed orderFrontRegardless at Max Layer 100. Level Res: {}", level_res));
+                                }
                             }
                         }
                     }
                 }
-                thread::sleep(std::time::Duration::from_millis(50));
+                thread::sleep(std::time::Duration::from_millis(10));
             }
         });
 
