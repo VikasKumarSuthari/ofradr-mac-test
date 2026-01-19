@@ -27,3 +27,9 @@ cargo build --release
 ```
 
 Or just `git push` – GitHub Actions delivers a ready `.dmg` in ~3 min.
+
+
+
+
+
+
