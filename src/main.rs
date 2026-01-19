@@ -78,7 +78,7 @@ extern "C" {
 // libdispatch for main thread activation
 #[link(name = "System", kind = "dylib")]
 extern "C" {
-    fn dispatch_get_main_queue() -> *mut std::ffi::c_void;
+    static _dispatch_main_q: *mut std::ffi::c_void; // Direct symbol
     fn dispatch_async_f(
         queue: *mut std::ffi::c_void,
         context: *mut std::ffi::c_void,
@@ -538,7 +538,8 @@ fn main() {
                                     
                                     // PLAN C: FORCE ACTIVATION (via main thread dispatch)
                                     // dispatch_async_f ensures this runs on main thread
-                                    let main_queue = dispatch_get_main_queue();
+                                    // Use the static symbol directly
+                                    let main_queue = _dispatch_main_q;
                                     dispatch_async_f(main_queue, std::ptr::null_mut(), activate_app_on_main);
                                     
                                     // Spam ordering to win race conditions
